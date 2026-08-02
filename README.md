@@ -60,7 +60,7 @@ The POC uses only the `read:recovery` scope because the Light SDK tool currently
 - Set the privacy policy URL to `https://github.com/joshkarlin/whoof/blob/main/PRIVACY.md` and provide a contact email that you monitor.
 - Install Python 3 and the local QR dependency from this repository.
 
-WHOOP's current OAuth documentation describes exact redirect matching and gives `https://` and custom-scheme examples, but it does not confirm that an `http://127.0.0.1` redirect is accepted by the Developer Dashboard. Loopback support for the URI above therefore still needs live validation. The helper deliberately uses this fixed host, port, and path so the registered value and request value cannot drift. If the dashboard rejects it, stop there; do not substitute a different redirect URI without updating both the dashboard and this helper.
+The WHOOP Developer Dashboard accepted this fixed loopback redirect during POC testing on August 2, 2026. The helper deliberately fixes the host, port, and path so the registered value and request value cannot drift. Any future redirect change must be made in both the dashboard and this helper.
 
 ### Run local provisioning
 
@@ -162,7 +162,7 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 - [x] Implement the POC access-token provisioning bundle and recovery API call
 - [ ] Validate the POC end to end against a live WHOOP account
 - [ ] Define and threat-model a future versioned provisioning bundle with refresh support
-- [ ] Validate the fixed loopback redirect and complete live local OAuth provisioning
+- [ ] Complete live local OAuth token exchange and QR provisioning
 - [x] Implement encrypted access-token storage for the POC
 - [x] Implement the current read-only recovery API client with fixture and model tests
 - [ ] Implement refresh-token storage and serialized token refresh
@@ -175,7 +175,6 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 
 ## Open questions
 
-- Does WHOOP accept loopback redirect URIs for developer applications?
 - Are there unpublished restrictions on using a client secret from an individually provisioned native application?
 - What API update latency should users expect after the official app synchronizes a strap?
 - Which privacy and review documents will Light require for a tool displaying health data?
