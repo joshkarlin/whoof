@@ -10,6 +10,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import tempfile
 import time
@@ -32,6 +33,14 @@ STATE_BYTES = 32
 
 MAX_PAYLOAD_LENGTH = 2_900
 MIN_TOKEN_LENGTH = 20
+MAX_OAUTH_ERROR_BODY_BYTES = 8_192
+MAX_OAUTH_ERROR_CODE_LENGTH = 64
+MAX_OAUTH_ERROR_DESCRIPTION_LENGTH = 240
+SAFE_OAUTH_ERROR_CODE = re.compile(r"^[A-Za-z0-9._:-]+$")
+SENSITIVE_ERROR_DESCRIPTION = re.compile(
+    r"(?i)\b(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|"
+    r"authorization[_ -]?code)\b\s*(?:[:=]\s*|is\s+)[^\s,;]+"
+)
 
 
 class OAuthError(Exception):
@@ -157,6 +166,65 @@ def parse_callback_target(target: str, expected_state: str) -> str:
     return values["code"][0]
 
 
+def _sanitize_oauth_error_description(
+    description: str,
+    sensitive_values: tuple[str, ...],
+) -> str:
+    """Keep a short, single-line description without credential material."""
+    description = SENSITIVE_ERROR_DESCRIPTION.sub("[redacted]", description)
+    for sensitive_value in sensitive_values:
+        if sensitive_value:
+            description = description.replace(sensitive_value, "[redacted]")
+    description = " ".join(description.split())
+    description = "".join(
+        character for character in description if character.isprintable()
+    )
+    return description[:MAX_OAUTH_ERROR_DESCRIPTION_LENGTH].rstrip()
+
+
+def _oauth_http_error_message(
+    error: HTTPError,
+    *,
+    sensitive_values: tuple[str, ...],
+) -> str:
+    """Build a bounded diagnostic from the documented OAuth JSON fields."""
+    status_message = f"WHOOP token exchange failed (HTTP {error.code})."
+    try:
+        body = error.read(MAX_OAUTH_ERROR_BODY_BYTES + 1)
+    except (OSError, ValueError):
+        return status_message
+    if len(body) > MAX_OAUTH_ERROR_BODY_BYTES:
+        return status_message
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return status_message
+    if not isinstance(payload, dict):
+        return status_message
+
+    parts: list[str] = []
+    error_code = payload.get("error")
+    if (
+        isinstance(error_code, str)
+        and len(error_code) <= MAX_OAUTH_ERROR_CODE_LENGTH
+        and SAFE_OAUTH_ERROR_CODE.fullmatch(error_code)
+    ):
+        parts.append(error_code)
+
+    description = payload.get("error_description")
+    if isinstance(description, str):
+        safe_description = _sanitize_oauth_error_description(
+            description,
+            sensitive_values,
+        )
+        if safe_description:
+            parts.append(safe_description)
+
+    if parts:
+        return f"{status_message[:-1]}: {' - '.join(parts)}"
+    return status_message
+
+
 class _CallbackServer(http.server.HTTPServer):
     allow_reuse_address = False
 
@@ -245,7 +313,12 @@ def exchange_authorization_code(code: str, client_id: str, client_secret: str) -
         with urlopen(request, timeout=HTTP_REQUEST_TIMEOUT_SECONDS) as response:
             response_body = response.read()
     except HTTPError as error:
-        raise OAuthError(f"WHOOP token exchange failed (HTTP {error.code}).") from error
+        raise OAuthError(
+            _oauth_http_error_message(
+                error,
+                sensitive_values=(code, client_id, client_secret),
+            )
+        ) from error
     except URLError as error:
         raise OAuthError("WHOOP token exchange could not reach the service.") from error
     except OSError as error:

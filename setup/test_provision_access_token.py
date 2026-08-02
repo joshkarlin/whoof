@@ -1,10 +1,12 @@
 import json
+import io
 import stat
 import tempfile
 import unittest
 from importlib.util import find_spec
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
@@ -16,6 +18,8 @@ from provision_access_token import (
     REDIRECT_URI,
     TOKEN_URL,
     MAX_PAYLOAD_LENGTH,
+    MAX_OAUTH_ERROR_CODE_LENGTH,
+    MAX_OAUTH_ERROR_DESCRIPTION_LENGTH,
     OAuthError,
     authorize_and_exchange,
     build_authorization_url,
@@ -177,6 +181,167 @@ class ProvisionAccessTokenTest(unittest.TestCase):
         self.assertIn("client_secret=client-secret", body)
         self.assertIn("redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback", body)
         self.assertNotIn("offline", body)
+
+    def test_token_exchange_reports_safe_oauth_json_error(self) -> None:
+        error = HTTPError(
+            TOKEN_URL,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": "invalid_client",
+                        "error_description": "The client authentication failed.",
+                        "error_uri": "https://example.test/diagnostics",
+                    }
+                ).encode()
+            ),
+        )
+        with patch("provision_access_token.urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                OAuthError,
+                r"WHOOP token exchange failed \(HTTP 403\): invalid_client - "
+                r"The client authentication failed\.\Z",
+            ):
+                exchange_authorization_code(
+                    "authorization-code",
+                    "client-id",
+                    "client-secret",
+                )
+
+    def test_token_exchange_preserves_useful_credential_terms(self) -> None:
+        error = HTTPError(
+            TOKEN_URL,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": "invalid_grant",
+                        "error_description": "Authorization code expired.",
+                    }
+                ).encode()
+            ),
+        )
+        with patch("provision_access_token.urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                OAuthError,
+                r"invalid_grant - Authorization code expired\.\Z",
+            ):
+                exchange_authorization_code(
+                    "authorization-code",
+                    "client-id",
+                    "client-secret",
+                )
+
+    def test_token_exchange_falls_back_for_malformed_or_non_object_body(self) -> None:
+        for body in (b"not json", json.dumps(["invalid_client"]).encode()):
+            error = HTTPError(TOKEN_URL, 403, "Forbidden", {}, io.BytesIO(body))
+            with self.subTest(body=body), patch(
+                "provision_access_token.urlopen", side_effect=error
+            ):
+                with self.assertRaisesRegex(
+                    OAuthError,
+                    r"WHOOP token exchange failed \(HTTP 403\)\.\Z",
+                ):
+                    exchange_authorization_code(
+                        "authorization-code",
+                        "client-id",
+                        "client-secret",
+                    )
+
+    def test_token_exchange_ignores_sensitive_and_unexpected_fields(self) -> None:
+        body = json.dumps(
+            {
+                "error": "invalid_client",
+                "error_description": (
+                    "bad client-secret=secret authorization-code=code "
+                    "access_token=access refresh_token=refresh\nnext"
+                ),
+                "client_secret": "secret-field",
+                "access_token": "token-field",
+                "request": "request-body-field",
+            }
+        ).encode()
+        error = HTTPError(TOKEN_URL, 403, "Forbidden", {}, io.BytesIO(body))
+        with patch("provision_access_token.urlopen", side_effect=error):
+            with self.assertRaises(OAuthError) as raised:
+                exchange_authorization_code(
+                    "authorization-code",
+                    "client-id",
+                    "client-secret",
+                )
+        message = str(raised.exception)
+        self.assertIn("invalid_client", message)
+        self.assertIn("bad [redacted] [redacted] [redacted] [redacted] next", message)
+        self.assertNotIn("secret-field", message)
+        self.assertNotIn("token-field", message)
+        self.assertNotIn("request-body-field", message)
+        self.assertNotIn("authorization-code", message)
+        self.assertNotIn("client-secret", message)
+        self.assertNotIn("access", message)
+        self.assertNotIn("refresh", message)
+
+    def test_token_exchange_sanitizes_and_bounds_error_fields(self) -> None:
+        long_code = "x" * (MAX_OAUTH_ERROR_CODE_LENGTH + 1)
+        long_description = "safe\x00\x01\n" + ("d" * 400)
+        body = json.dumps(
+            {"error": long_code, "error_description": long_description}
+        ).encode()
+        error = HTTPError(TOKEN_URL, 403, "Forbidden", {}, io.BytesIO(body))
+        with patch("provision_access_token.urlopen", side_effect=error):
+            with self.assertRaises(OAuthError) as raised:
+                exchange_authorization_code(
+                    "authorization-code",
+                    "client-id",
+                    "client-secret",
+                )
+        message = str(raised.exception)
+        self.assertTrue(message.endswith("d"))
+        self.assertLessEqual(
+            len(message),
+            len("WHOOP token exchange failed (HTTP 403): ")
+            + MAX_OAUTH_ERROR_DESCRIPTION_LENGTH,
+        )
+        self.assertNotIn("\x00", message)
+        self.assertNotIn("\x01", message)
+
+        for invalid_code in ("invalid code", "invalid/\ncode", "\U0001f600"):
+            body = json.dumps({"error": invalid_code}).encode()
+            error = HTTPError(TOKEN_URL, 403, "Forbidden", {}, io.BytesIO(body))
+            with self.subTest(invalid_code=invalid_code), patch(
+                "provision_access_token.urlopen", side_effect=error
+            ):
+                with self.assertRaisesRegex(
+                    OAuthError,
+                    r"WHOOP token exchange failed \(HTTP 403\)\.\Z",
+                ):
+                    exchange_authorization_code(
+                        "authorization-code",
+                        "client-id",
+                        "client-secret",
+                    )
+
+    def test_token_exchange_falls_back_for_oversized_error_body(self) -> None:
+        error = HTTPError(
+            TOKEN_URL,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(b"{" + b" " * 8192 + b"}"),
+        )
+        with patch("provision_access_token.urlopen", side_effect=error):
+            with self.assertRaisesRegex(
+                OAuthError,
+                r"WHOOP token exchange failed \(HTTP 403\)\.\Z",
+            ):
+                exchange_authorization_code(
+                    "authorization-code",
+                    "client-id",
+                    "client-secret",
+                )
 
     @unittest.skipUnless(find_spec("qrcode"), "qrcode dependency is not installed")
     def test_qr_output_is_private_and_does_not_overwrite_by_default(self) -> None:
