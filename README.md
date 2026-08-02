@@ -58,7 +58,7 @@ The POC uses only the `read:recovery` scope because the Light SDK tool currently
   `http://127.0.0.1:8765/callback`
 - Request or configure `read:recovery` only. Do not add `offline`.
 - Set the privacy policy URL to `https://github.com/joshkarlin/whoof/blob/main/PRIVACY.md` and provide a contact email that you monitor.
-- Install Python 3 and the local QR dependency from this repository.
+- Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 The WHOOP Developer Dashboard accepted this fixed loopback redirect during POC testing on August 2, 2026. The helper deliberately fixes the host, port, and path so the registered value and request value cannot drift. Any future redirect change must be made in both the dashboard and this helper.
 
@@ -67,10 +67,7 @@ The WHOOP Developer Dashboard accepted this fixed loopback redirect during POC t
 From the repository root:
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -r setup/requirements.txt
-python3 setup/provision_access_token.py --output ./whoof-provision.png
+uv run --frozen python setup/provision_access_token.py --output ./whoof-provision.png
 ```
 
 The helper prompts for the client ID and prompts for the client secret with terminal echo disabled. It opens the WHOOP authorization page in your default browser. After you authorize, WHOOP redirects to the local callback, the helper validates a cryptographically random `state` value, and it exchanges the authorization code at WHOOP's documented endpoints. The client ID and secret are accepted only in memory; they are not command-line arguments, written to disk, or logged. The client secret and access token are never placed in a URL; the browser URL contains only WHOOP's required authorization parameters, including `client_id`, `redirect_uri`, `scope`, and `state`. Authorization codes are not printed or persisted.
