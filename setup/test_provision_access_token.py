@@ -84,12 +84,22 @@ class ProvisionAccessTokenTest(unittest.TestCase):
         with self.assertRaises(OAuthError):
             parse_callback_target(f"/other?code=code&state={state}", state)
 
-    def test_callback_rejects_duplicates_errors_and_unexpected_fields(self) -> None:
+    def test_callback_ignores_unrecognized_fields_and_their_duplicates(self) -> None:
+        state = "a" * 64
+        self.assertEqual(
+            "code",
+            parse_callback_target(
+                f"{REDIRECT_PATH}?code=code&state={state}"
+                "&new_field=one&new_field=two&another_new_field=three",
+                state,
+            ),
+        )
+
+    def test_callback_rejects_duplicates_and_errors(self) -> None:
         state = "a" * 64
         invalid_targets = (
             f"{REDIRECT_PATH}?code=one&code=two&state={state}",
             f"{REDIRECT_PATH}?error=access_denied&state={state}",
-            f"{REDIRECT_PATH}?code=code&state={state}&unexpected=value",
             f"{REDIRECT_PATH}?code=code&state=",
         )
         for target in invalid_targets:

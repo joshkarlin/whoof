@@ -140,14 +140,10 @@ def parse_callback_target(target: str, expected_state: str) -> str:
             parsed.query,
             keep_blank_values=True,
             strict_parsing=True,
-            max_num_fields=8,
         )
     except ValueError as error:
         raise OAuthError("WHOOP returned an invalid authorization response.") from error
 
-    allowed_keys = {"code", "state", "error", "error_description"}
-    if set(values) - allowed_keys:
-        raise OAuthError("WHOOP returned an unexpected authorization response.")
     if len(values.get("state", [])) != 1:
         raise OAuthError("WHOOP returned an invalid authorization state.")
     returned_state = values["state"][0]
