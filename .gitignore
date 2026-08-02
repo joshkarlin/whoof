@@ -50,3 +50,9 @@ bin/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+hs_err_pid*.log
+replay_pid*.log
+
+### Local Whoof setup ###
+/.venv/
+/whoof-provision.png

@@ -1,64 +1,190 @@
-# light-sdk
-or: a tool for building Tools
+# Whoof
 
-## tl;dr
-This repository contains the scaffolding for building simple tools for the Light Phone III. Included are a library ([:sdk:client](./sdk/client)) and placeholder application ([:tool](./tool)) that depends on it. To create a tool that is fully compatible with LightOS, you must write your application code within the `tool` module, using the primitives provided by the sdk client library.
+Whoof is an unofficial, read-only WHOOP companion for the Light Phone III. It is intended for its developers and other technically capable users, rather than as a consumer product.
 
-You can and should use current Android best practices: Kotlin for all source code, Compose for UI, Coroutines for async programming, and MVVM architecture. **Although this is appears to be a fairly standard Android dev environment, you will quickly find out that we are (gently but broadly) restricting which Android APIs and third-party libraries can be used. This is in an effort to provide a secure and distinctly _light_ experience for our users. These restrictions are _not_ set in stone and should ease up over time. If there is a stable, open-source library that you'd like us to allow, please let us know! More on this later.**
+The official WHOOP app on another phone remains responsible for pairing with the strap, synchronizing sensor data, updating firmware, and sending data to WHOOP. Whoof reads the resulting recovery, sleep, strain, and workout data through the official WHOOP Developer API and presents a focused Light Phone interface.
 
-## IMPORTANT!! July 1, 2026 Update
-If you're reading this, welcome! You're early! (in a cool way)
-This repo is a work-in-progress and will remain so for a while. Things are going to change _fast_ in the coming weeks. If you're going to start building right away, be sure to `git pull` frequently.
-Before you do, though, please be aware that **while we feel good about letting everybody start to explore and build, we are still working on the infrastructure to properly deploy your new tools.**
-The currently builds of LightOS in the wild are not yet ready to "play nice" with the tools built here. If you're someone who's already comfortable working with ADB to sideload APKs on your
-Light Phone III, you can totally do that with whatever you do here! But we're shooting to make these tools feel as seamless as the ones already available in LightOS, and that's going to take a bit more work. 
-We're hoping to have an update on that front later this month. In the meantime, the best way to start working is to use an Android emulator running our new [LightOS Emulator](sdk/emulator). The instructions for getting that up and running
-are [right here](docs/system_app).
+Whoof is not affiliated with or endorsed by WHOOP or Light. It is a general-wellness tool, not a medical device, and must not be used to make medical decisions.
 
-## Quickstart
-### Grabbing a token
-We're currently hosting our library builds with GitHub Packages so each artifact can live beside its source. The tradeoff is that you'll need to add a GitHub token with package read access to your local build environment. **We are considering migrating to Maven Central to avoid this requirement when everything goes public.**
-For now, you can either add environment variables with your username and token:
+See the [privacy policy](PRIVACY.md) for the data processed by the current proof of concept.
+
+## Status
+
+Whoof currently contains a minimal proof of concept. The Light SDK tool accepts a short-lived WHOOP access token through a locally generated QR code, calls the WHOOP Developer API, and displays the latest recovery record.
+
+This POC deliberately does not implement OAuth inside the Light Phone app, refresh tokens, token rotation, or background synchronization. A new QR code must be generated when the access token expires.
+
+The initial architecture is deliberately constrained to capabilities available in the Light SDK so that the project can be considered for Light's community-tool build and submission process.
+
+## Product direction
+
+### Initial scope
+
+- POC: show the latest WHOOP recovery record
+- Planned: show day strain, sleep, and workout data
+- Planned: cache records for offline viewing and refresh through Light SDK background work
+- Planned: allow the user to disconnect and delete local data
+
+### Operating model
+
+- The WHOOP strap remains paired with the official WHOOP app on another device
+- Each Whoof user creates and owns a WHOOP Developer application
+- OAuth credentials are supplied at runtime and are never built into Whoof
+- Whoof communicates directly with WHOOP's official API
+- Whoof has no developer-operated backend, account system, telemetry, or data relay
+
+### Non-goals for the initial version
+
+- Pairing the Light Phone directly with a WHOOP strap
+- Replacing the official WHOOP app or subscription
+- Reimplementing WHOOP's analytics from raw sensor data
+- Live heart rate, strap battery, firmware updates, alarms, or strap configuration
+- Webhooks or push infrastructure
+- Consumer-friendly, one-tap onboarding
+
+A direct-Bluetooth, fully on-device implementation similar to NOOP may be researched separately. It is not part of the initial architecture because it would take ownership of the strap and currently requires Bluetooth and persistent-service capabilities that the Light SDK does not expose.
+
+## POC Setup
+
+The local setup helper performs the WHOOP Authorization Code flow in your browser, receives the one-time authorization code on a loopback HTTP server, exchanges it directly with WHOOP, and generates the existing `whoof://` provisioning QR code. Postman is not required.
+
+The POC uses only the `read:recovery` scope because the Light SDK tool currently calls the recovery endpoint. It does not request `offline`, does not request a refresh token, and never places a client secret in the QR code. Each developer or user must use a WHOOP Developer application they control; the helper does not send credentials to a Whoof server.
+
+### Before you start
+
+- Keep the official WHOOP app set up on another phone so it remains responsible for strap pairing and synchronization.
+- Create or use a WHOOP Developer application that you control, following [WHOOP's getting-started documentation](https://developer.whoop.com/docs/developing/getting-started/).
+- In the WHOOP Developer Dashboard, register this redirect URI exactly:
+  `http://127.0.0.1:8765/callback`
+- Request or configure `read:recovery` only. Do not add `offline`.
+- Set the privacy policy URL to `https://github.com/joshkarlin/whoof/blob/main/PRIVACY.md` and provide a contact email that you monitor.
+- Install Python 3 and the local QR dependency from this repository.
+
+WHOOP's current OAuth documentation describes exact redirect matching and gives `https://` and custom-scheme examples, but it does not confirm that an `http://127.0.0.1` redirect is accepted by the Developer Dashboard. Loopback support for the URI above therefore still needs live validation. The helper deliberately uses this fixed host, port, and path so the registered value and request value cannot drift. If the dashboard rejects it, stop there; do not substitute a different redirect URI without updating both the dashboard and this helper.
+
+### Run local provisioning
+
+From the repository root:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r setup/requirements.txt
+python3 setup/provision_access_token.py --output ./whoof-provision.png
 ```
-GITHUB_ACTOR=your_username
-GITHUB_TOKEN=your_token
+
+The helper prompts for the client ID and prompts for the client secret with terminal echo disabled. It opens the WHOOP authorization page in your default browser. After you authorize, WHOOP redirects to the local callback, the helper validates a cryptographically random `state` value, and it exchanges the authorization code at WHOOP's documented endpoints. The client ID and secret are accepted only in memory; they are not command-line arguments, written to disk, or logged. The client secret and access token are never placed in a URL; the browser URL contains only WHOOP's required authorization parameters, including `client_id`, `redirect_uri`, `scope`, and `state`. Authorization codes are not printed or persisted.
+
+The helper has a bounded five-minute callback timeout and listens only on `127.0.0.1:8765`. It requests `read:recovery` only and sends no `offline` scope. The QR is generated locally with the Python `qrcode` package; do not paste credentials into an online QR generator or upload the generated image to a QR service.
+
+Open the local `whoof-provision.png` on the computer and scan it from Whoof's `CONNECT WHOOP` screen. The image contains a bearer token and is sensitive. Delete it after scanning and do not email, commit, or otherwise share it. The helper refuses to overwrite an existing image unless `--overwrite` is supplied explicitly.
+
+### Token lifetime and replacement
+
+This is a short-lived access-token POC. Whoof stores the scanned token encrypted on the Light Phone, but it cannot refresh it. When Whoof reports that the access token has expired, repeat the local authorization flow and generate a new QR code. Do not add a refresh token to the QR payload: refresh-token support requires a separate implementation and review.
+
+## Architecture
+
+### Local SDK signing
+
+This repository inherits `sdk/keys/lightsdk-dev.jks` and its history directly from the official
+[Light SDK](https://github.com/lightphone/light-sdk). Light publishes that certificate for local SDK
+development and the LightOS emulator; production LightOS does not treat it as a Light-approved
+signing certificate. Do not replace it or place production or private signing material in this
+repository.
+
+The repository is expected to contain two independently buildable parts:
+
+```text
+whoof/
+  tool/       Light SDK application installed on the Light Phone
+  setup/      Local developer provisioning helper
+  docs/       Architecture, privacy, setup, and submission documentation
 ```
-or you can add them to your `local.properties` file:
-```
-gpr.user=your_username
-gpr.key=your_token
-```
 
-### Running your Tool
-**You can test your tool on any Android device or emulator**, but certain functionality (receiving push notifications, requesting special permissions) can only be tested with:
-A) Real Light Phone hardware running LightOS
-B) An Android emulator (on your computer) set up to run our LightOS emulator app as a _system app_ ([see advanced instructions](docs/system_app))
+### Light tool
 
-You can quickly [create an emulator](https://developer.android.com/studio/run/managing-avds) that generally feels like an LPIII by using the following settings:
-* 1080 X 1240, 3.92" display
-* Android API 34
-* NO Google Play Services installed
+The Light Phone application will use only SDK-supported facilities:
 
-### Start Building
-1. Fork and/or clone this repository into your local dev environment.
-2. Install Android Studio and open this project within it. (IntelliJ IDEA should also work)
+- Kotlin and Compose
+- Light SDK UI and navigation primitives
+- Ktor or OkHttp for HTTPS requests
+- Kotlin serialization for API payloads
+- Room for cached WHOOP records
+- DataStore for nonsensitive settings and synchronization metadata
+- Android Keystore and AES-GCM for OAuth credentials
+- `LightWork` for unique periodic synchronization
+- `LightQrCodeScanner` for provisioning
 
-3. Edit the code in `HomeScreen` and `HomeScreenViewModel` to get started. `Homescreen` surfaces a `@Composable` method named `Content`. This is the UI that is shown when the tool first boots. You'll notice this UI sources data from it's `viewModel` field, which is an instance of `HomeScreenViewModel`. Edit that class with your screen's logic and expose the data to the UI using either Compose `State` or Coroutine `Flow`s. If you want to create a new screen, create a new Screen/ViewModel pair: your screen should extend from `LightScreen` and your VM from `LightScreenViewModel`. Your screen implementation will need:
-   1. A direct reference to your ViewModel's class type
-   2. A factory method for creating a new instance of your ViewModel.
+Expected permissions are `INTERNET`, `ACCESS_NETWORK_STATE`, and `CAMERA`. No custom Android manifest, service, receiver, or unsupported Android API should be required.
 
-Look at `HomeScreen` as an example for how this is done. To navigate to your new screen, use the `navigateTo` function built into `LightScreen` - just pass it a lambda to create an instance of your new screen. Note that the `LightScreen` constructor takes in a `SealedLightActivity`. The lambda is provided an instance of this as a default parameter.
+### Setup helper
 
-Since LightOS does not use Android system navigation, we provide a back button for you. As long as you use `navigateTo` to move between screens, our back button should work great. If need be, you can override the `onBackPressed` method in your `LightViewModel`.
+The setup helper is not installed on the Light Phone and is not part of the APK. In this POC, OAuth authorization happens locally through the helper's browser and loopback callback; it produces a one-time provisioning bundle. The bundle format is versioned and validated, and the token is not logged.
 
-### Sharing Your Tool
-**As of July 1, 2026, there's no "easy" way to share your tool with a Light Phone III user. We're working hard on that. This is how we believe it's going to look.**
+### Token handling in the POC
 
-Given our relatively limited resources and desire to keep our users safe, we're requiring that all community tools be open source (including our own!). We will be building and signing these tools directly from a publicly available git commit, and we'll be archiving the source at build time. You're free to build and share privately, but LightOS won't let you install tools that are not signed by us without acknowledging privacy and performance risks. We won't block users from performing these "dangerous" sideloads, but we're not going to encourage it either. In the near future, you'll be able to queue up a build of your tool on our servers, and if it follows our guidelines and compiles cleanly, we will hand you back a signed, shareable APK.
+- The QR payload is versioned as `whoof://provision?v=1&access_token=...`.
+- The QR contains only the short-lived access token. It does not contain a client ID, client secret, or refresh token.
+- The Light SDK tool validates the payload before storing it and encrypts the token with Android Keystore-backed AES-GCM.
+- The setup helper never logs the token and sends credentials only to WHOOP's documented OAuth endpoints.
+- A token that is exposed should be treated as compromised; generate a replacement through WHOOP's official authorization flow.
 
-Once we release a version of LightOS that supports community tools, users will have an option to choose what kind of tools they want to be able to run on their device:
-- **Light-approved tools**: These include tools that are either built internally by the Light team, or built by the community and officially tested/signed-off by the Light team. We don't know _exactly_ what that sign-off process is going to look like, but as a heads-up: we're going to be looking pretty hard at whether a submitted tool matches the Light ethos both functionally and aesthetically. We've included a UX/UI library to make this as easy as possible! From a technical standpoint, these approved tools are both signed by us _and_ added to an "allow-list" within LightOS. Phones with this option selected will only install and display tools that meet both criteria.
-- **SDK-built tools**: This is a slightly more permissive choice. Phones with this option selected will install and launch any tool that was built and signed by Light. These don't require any manual approval by us (though we can block them in extreme cases). If a user wants to be able to install a tool that was shared locally or somewhere outside of Light's dashboard, but they still want to be confident that it will run well and integrate nicely with LightOS, they might choose this option!
-- **Any tools**: A user will have the option to make any APK launchable from LightOS, but they will own the responsibility of getting them un/installed. When a user selects this option, we will be warning them that they are potentially opening their device up to security risks, and in doing so will limit our ability to support them if something goes wrong.
+Refresh-token rotation and serialized refresh are future work, not behavior provided by this POC.
 
-## [Complete Documentation](./docs)
+## Light submission target
+
+Whoof should remain eligible for Light's SDK-built tool pipeline from the beginning:
+
+- Public source code
+- A valid `lighttool.toml`
+- Application code contained in the SDK `tool` module
+- Only allowlisted dependencies, plugins, permissions, and Android APIs
+- Successful build in Light's offline controlled builder
+- No credentials, private artifacts, or generated secrets in the repository
+- Light-native layout and navigation for the LP3's 1080x1240 display
+- Clear privacy, setup, support, trademark, and wellness disclaimers
+
+Passing the SDK builder does not guarantee that Light will classify Whoof as a Light-approved tool. Manual product, privacy, performance, and design review may impose additional requirements.
+
+## Security and privacy principles
+
+- Request the minimum OAuth scopes needed by the implemented screens
+- Store health data only on the Light Phone
+- Encrypt OAuth credentials at rest with a non-exportable Keystore key
+- Use TLS exclusively and communicate only with documented WHOOP endpoints
+- Provide explicit API revocation and complete local-data deletion
+- Collect no analytics, telemetry, crash reports, or user identifiers
+- Treat API payloads, database exports, screenshots, and logs as sensitive health data
+
+## Initial roadmap
+
+- [x] Implement the POC access-token provisioning bundle and recovery API call
+- [ ] Validate the POC end to end against a live WHOOP account
+- [ ] Define and threat-model a future versioned provisioning bundle with refresh support
+- [ ] Validate the fixed loopback redirect and complete live local OAuth provisioning
+- [x] Implement encrypted access-token storage for the POC
+- [x] Implement the current read-only recovery API client with fixture and model tests
+- [ ] Implement refresh-token storage and serialized token refresh
+- [ ] Build the Today screen for recovery, strain, and sleep
+- [ ] Add recent sleep, cycle, recovery, and workout history
+- [ ] Add Room caching, manual refresh, and periodic synchronization
+- [ ] Add disconnect, access revocation, and complete local-data deletion
+- [ ] Test offline behavior, token expiry, interrupted refresh, and API rate limiting
+- [ ] Verify the controlled Light builder and prepare submission documentation
+
+## Open questions
+
+- Does WHOOP accept loopback redirect URIs for developer applications?
+- Are there unpublished restrictions on using a client secret from an individually provisioned native application?
+- What API update latency should users expect after the official app synchronizes a strap?
+- Which privacy and review documents will Light require for a tool displaying health data?
+- Should the setup helper support only macOS initially, or be cross-platform from its first release?
+
+## References
+
+- [WHOOP Developer documentation](https://developer.whoop.com/)
+- [WHOOP OAuth documentation](https://developer.whoop.com/docs/developing/oauth/)
+- [WHOOP API reference](https://developer.whoop.com/api/)
+- [Light SDK](https://github.com/lightphone/light-sdk)
+- [NOOP](https://github.com/ryanbr/noop), a separate direct-Bluetooth implementation and research reference
