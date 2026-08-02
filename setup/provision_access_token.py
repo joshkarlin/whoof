@@ -22,6 +22,7 @@ import webbrowser
 
 AUTHORIZATION_URL = "https://api.prod.whoop.com/oauth/oauth2/auth"
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
+USER_AGENT = "Whoof/0.1 (+https://github.com/joshkarlin/whoof)"
 REDIRECT_HOST = "127.0.0.1"
 REDIRECT_PORT = 8765
 REDIRECT_PATH = "/callback"
@@ -306,6 +307,7 @@ def exchange_authorization_code(code: str, client_id: str, client_secret: str) -
         headers={
             "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
         },
         method="POST",
     )

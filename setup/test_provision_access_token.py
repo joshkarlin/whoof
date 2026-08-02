@@ -17,6 +17,7 @@ from provision_access_token import (
     REDIRECT_PATH,
     REDIRECT_URI,
     TOKEN_URL,
+    USER_AGENT,
     MAX_PAYLOAD_LENGTH,
     MAX_OAUTH_ERROR_CODE_LENGTH,
     MAX_OAUTH_ERROR_DESCRIPTION_LENGTH,
@@ -175,6 +176,7 @@ class ProvisionAccessTokenTest(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertIsInstance(request, Request)
         self.assertEqual(TOKEN_URL, request.full_url)
+        self.assertEqual(USER_AGENT, request.get_header("User-agent"))
         body = request.data.decode("ascii")
         self.assertIn("grant_type=authorization_code", body)
         self.assertIn("client_id=client-id", body)
