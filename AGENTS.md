@@ -86,6 +86,8 @@ WHOOP refresh tokens rotate. A successful refresh invalidates the previous acces
 ## Documentation and project state
 
 - Keep `README.md` accurate when product scope, OAuth behavior, permissions, or SDK constraints change.
+- Treat the `README.md` roadmap as the source of truth for implementation tasks. Update it as work starts, completes, is blocked, or changes scope; do not leave task status to a later cleanup pass.
+- Use coding subagents as workhorses for bounded implementation and verification tasks. Give each subagent a disjoint write scope, review its changes before integration, and keep security-sensitive OAuth decisions under direct review.
 - Record unresolved limitations under `Open questions` or a future `Known issues` section rather than implying unsupported behavior works.
 - Keep setup instructions explicit about the required official WHOOP app, separate device, developer account, and individual credentials.
 - Do not mark roadmap items complete until the behavior has been implemented and verified.

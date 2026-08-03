@@ -10,9 +10,9 @@ See the [privacy policy](PRIVACY.md) for the data processed by the current proof
 
 ## Status
 
-Whoof currently contains a minimal proof of concept. The Light SDK tool accepts a short-lived WHOOP access token through a locally generated QR code, calls the WHOOP Developer API, and displays the latest recovery record.
+Whoof currently contains a minimal proof of concept. The Light SDK tool accepts a locally generated v2 provisioning QR code, stores the WHOOP OAuth credentials encrypted on-device, calls the WHOOP Developer API, and displays the latest recovery record.
 
-This POC deliberately does not implement OAuth inside the Light Phone app, refresh tokens, token rotation, or background synchronization. A new QR code must be generated when the access token expires.
+OAuth authorization remains on the developer's local computer rather than inside the Light Phone app. Serialized on-device refresh-token rotation is implemented and unit-tested, but still requires live device validation. Background synchronization is not yet implemented.
 
 The initial architecture is deliberately constrained to capabilities available in the Light SDK so that the project can be considered for Light's community-tool build and submission process.
 
@@ -48,7 +48,7 @@ A direct-Bluetooth, fully on-device implementation similar to NOOP may be resear
 
 The local setup helper performs the WHOOP Authorization Code flow in your browser, receives the one-time authorization code on a loopback HTTP server, exchanges it directly with WHOOP, and generates the existing `whoof://` provisioning QR code. Postman is not required.
 
-The POC uses only the `read:recovery` scope because the Light SDK tool currently calls the recovery endpoint. It does not request `offline`, does not request a refresh token, and never places a client secret in the QR code. Each developer or user must use a WHOOP Developer application they control; the helper does not send credentials to a Whoof server.
+The current helper requests `read:recovery read:cycles read:sleep read:workout offline`. These are the read-only data domains committed to the roadmap, and requesting them together avoids repeating provisioning as the Today and history screens are added. The `offline` scope is required for WHOOP to issue the rotating refresh token used for on-device refresh. Whoof does not request `read:profile` or `read:body_measurement`. Each developer or user must use a WHOOP Developer application they control; the helper does not send credentials to a Whoof server.
 
 ### Before you start
 
@@ -56,7 +56,7 @@ The POC uses only the `read:recovery` scope because the Light SDK tool currently
 - Create or use a WHOOP Developer application that you control, following [WHOOP's getting-started documentation](https://developer.whoop.com/docs/developing/getting-started/).
 - In the WHOOP Developer Dashboard, register this redirect URI exactly:
   `http://127.0.0.1:8765/callback`
-- Request or configure `read:recovery` only. Do not add `offline`.
+- Request or configure `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, and `offline` only.
 - Set the privacy policy URL to `https://github.com/joshkarlin/whoof/blob/main/PRIVACY.md` and provide a contact email that you monitor.
 - Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -72,13 +72,13 @@ uv run --frozen python setup/provision_access_token.py --output ./whoof-provisio
 
 The helper prompts for the client ID and prompts for the client secret with terminal echo disabled. It opens the WHOOP authorization page in your default browser. After you authorize, WHOOP redirects to the local callback, the helper validates a cryptographically random `state` value, and it exchanges the authorization code at WHOOP's documented endpoints. The client ID and secret are accepted only in memory; they are not command-line arguments, written to disk, or logged. The client secret and access token are never placed in a URL; the browser URL contains only WHOOP's required authorization parameters, including `client_id`, `redirect_uri`, `scope`, and `state`. Authorization codes are not printed or persisted.
 
-The helper has a bounded five-minute callback timeout and listens only on `127.0.0.1:8765`. It requests `read:recovery` only and sends no `offline` scope. The QR is generated locally with the Python `qrcode` package; do not paste credentials into an online QR generator or upload the generated image to a QR service.
+The helper has a bounded five-minute callback timeout and listens only on `127.0.0.1:8765`. It requests `read:recovery read:cycles read:sleep read:workout offline`. The QR is generated locally with the Python `qrcode` package; do not paste credentials into an online QR generator or upload the generated image to a QR service.
 
-Open the local `whoof-provision.png` on the computer and scan it from Whoof's `CONNECT WHOOP` screen. The image contains a bearer token and is sensitive. Delete it after scanning and do not email, commit, or otherwise share it. The helper refuses to overwrite an existing image unless `--overwrite` is supplied explicitly.
+Open the local `whoof-provision.png` on the computer and scan it from Whoof's `CONNECT WHOOP` screen. The v2 image contains the developer client ID and secret plus access and refresh tokens. It grants control over this WHOOP integration and must be treated like a password. Delete it after scanning and do not email, commit, back up, or otherwise share it. The helper refuses to overwrite an existing image unless `--overwrite` is supplied explicitly.
 
 ### Token lifetime and replacement
 
-This is a short-lived access-token POC. Whoof stores the scanned token encrypted on the Light Phone, but it cannot refresh it. When Whoof reports that the access token has expired, repeat the local authorization flow and generate a new QR code. Do not add a refresh token to the QR payload: refresh-token support requires a separate implementation and review.
+Whoof now performs one serialized refresh after an API request returns `401`, persists WHOOP's replacement token pair, and retries the original request once. Refresh has unit and build verification but still requires live on-device validation with a v2 QR. Until that validation succeeds, retain the ability to repeat local authorization and provision a replacement QR.
 
 ## Architecture
 
@@ -119,15 +119,23 @@ Expected permissions are `INTERNET`, `ACCESS_NETWORK_STATE`, and `CAMERA`. No cu
 
 The setup helper is not installed on the Light Phone and is not part of the APK. In this POC, OAuth authorization happens locally through the helper's browser and loopback callback; it produces a one-time provisioning bundle. The bundle format is versioned and validated, and the token is not logged.
 
-### Token handling in the POC
+### Token handling
 
 - The QR payload is versioned as `whoof://provision?v=1&access_token=...`.
-- The QR contains only the short-lived access token. It does not contain a client ID, client secret, or refresh token.
-- The Light SDK tool validates the payload before storing it and encrypts the token with Android Keystore-backed AES-GCM.
+- The current v2 payload contains the client ID, client secret, access token, rotating refresh token, and access-token lifetime required for on-device refresh. The parser retains v1 compatibility.
+- The Light SDK tool validates the exact field set before storing all credentials together with Android Keystore-backed AES-GCM.
 - The setup helper never logs the token and sends credentials only to WHOOP's documented OAuth endpoints.
-- A token that is exposed should be treated as compromised; generate a replacement through WHOOP's official authorization flow.
+- A v2 QR exposed before deletion compromises both the user authorization and the developer application secret. Revoke the authorization and rotate the developer client secret in the WHOOP dashboard before provisioning again.
 
-Refresh-token rotation and serialized refresh are future work, not behavior provided by this POC.
+Serialized refresh and persistence of WHOOP's replacement tokens are implemented. Live token-rotation and interrupted-persistence behavior still require device validation.
+
+### Provisioning threat model
+
+- The local computer, its browser, the displayed QR image, and the Light Phone are trusted during provisioning; no intermediary service is trusted or required.
+- The QR image is plaintext by necessity and is the highest-risk transient artifact. The helper creates it with owner-only file permissions and never overwrites an existing file implicitly; the user must delete it immediately after a successful scan.
+- Credentials are accepted only from an exact, size-bounded v1 or v2 payload and are encrypted before persistence. Unknown, duplicate, malformed, control-character, and oversized fields are rejected.
+- Android Keystore protects credentials at rest but does not protect a compromised, unlocked device or a malicious process with equivalent application privileges.
+- WHOOP rotates both access and refresh tokens. Future refresh logic must serialize requests and persist the replacement pair atomically; interruption after remote rotation but before local persistence may require reprovisioning.
 
 ## Light submission target
 
@@ -146,7 +154,7 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 
 ## Security and privacy principles
 
-- Request the minimum OAuth scopes needed by the implemented screens
+- Request only the read-only OAuth scopes committed to the roadmap; exclude profile and body-measurement access unless a concrete feature later requires them
 - Store health data only on the Light Phone
 - Encrypt OAuth credentials at rest with a non-exportable Keystore key
 - Use TLS exclusively and communicate only with documented WHOOP endpoints
@@ -154,20 +162,26 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 - Collect no analytics, telemetry, crash reports, or user identifiers
 - Treat API payloads, database exports, screenshots, and logs as sensitive health data
 
-## Initial roadmap
+## Roadmap
+
+This checklist is the source of truth for implementation progress. Update it when work starts, completes, or changes scope.
 
 - [x] Implement the POC access-token provisioning bundle and recovery API call
-- [ ] Validate the POC end to end against a live WHOOP account
-- [ ] Define and threat-model a future versioned provisioning bundle with refresh support
-- [ ] Complete live local OAuth token exchange and QR provisioning
-- [x] Implement encrypted access-token storage for the POC
-- [x] Implement the current read-only recovery API client with fixture and model tests
-- [ ] Implement refresh-token storage and serialized token refresh
-- [ ] Build the Today screen for recovery, strain, and sleep
-- [ ] Add recent sleep, cycle, recovery, and workout history
+- [x] Complete live local OAuth token exchange and QR provisioning
+- [x] Store the provisioned access token encrypted on-device
+- [x] Validate direct on-device WHOOP API access against a live account
+- [x] Display live recovery and resting heart rate data on the Light Phone III
+- [x] Define and threat-model the v2 provisioning bundle with refresh-token support
+- [x] Implement validated v2 provisioning and encrypted storage for the complete refresh credential set
+- [x] Implement and unit-test serialized token refresh and rotating-token persistence
+- [x] Validate v2 provisioning on-device against a live WHOOP account
+- [ ] Validate a live WHOOP token rotation on-device after the provisioned access token expires
+- [x] Add explicit loading, authorization-expired, no-data, offline, and API-error states
+- [x] Build and validate the Today screen for recovery, strain, sleep, RHR, HRV, and last-sync time
+- [ ] Add recent sleep, cycle, recovery, and workout history (in progress)
 - [ ] Add Room caching, manual refresh, and periodic synchronization
 - [ ] Add disconnect, access revocation, and complete local-data deletion
-- [ ] Test offline behavior, token expiry, interrupted refresh, and API rate limiting
+- [ ] Test offline behavior, token expiry, interrupted refresh, token rotation, and API rate limiting
 - [ ] Verify the controlled Light builder and prepare submission documentation
 
 ## Open questions

@@ -60,5 +60,6 @@ kotlin {
 dependencies {
     implementation(project(":sdk:client"))
     testImplementation(libs.kotlin.test)
+    testImplementation(libs.kotlinx.coroutines.test)
     ksp(libs.androidx.room.compiler)
 }

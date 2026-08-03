@@ -14,7 +14,7 @@ import re
 import secrets
 import tempfile
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
@@ -27,7 +27,7 @@ REDIRECT_HOST = "127.0.0.1"
 REDIRECT_PORT = 8765
 REDIRECT_PATH = "/callback"
 REDIRECT_URI = f"http://{REDIRECT_HOST}:{REDIRECT_PORT}{REDIRECT_PATH}"
-OAUTH_SCOPE = "read:recovery"
+OAUTH_SCOPE = "read:recovery read:cycles read:sleep read:workout offline"
 CALLBACK_TIMEOUT_SECONDS = 300
 HTTP_REQUEST_TIMEOUT_SECONDS = 30
 STATE_BYTES = 32
@@ -48,12 +48,47 @@ class OAuthError(Exception):
     """A user-safe OAuth failure that does not contain credential material."""
 
 
-def validate_access_token(token: str) -> str:
-    """Return a normalized token or raise ValueError without including it in errors."""
+class OAuthTokens(NamedTuple):
+    """Validated token response returned by WHOOP."""
+
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+class OAuthCredentials(NamedTuple):
+    """Validated tokens together with the caller's WHOOP application credentials."""
+
+    client_id: str
+    client_secret: str
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+def _validate_oauth_token(token: str, label: str) -> str:
+    """Return a normalized token without including credential material in errors."""
+    if not isinstance(token, str):
+        raise ValueError(f"{label} is missing or malformed.")
     normalized = token.strip()
     if len(normalized) < MIN_TOKEN_LENGTH or any(character.isspace() for character in normalized):
-        raise ValueError("Access token is missing or malformed.")
+        raise ValueError(f"{label} is missing or malformed.")
     return normalized
+
+
+def validate_access_token(token: str) -> str:
+    return _validate_oauth_token(token, "Access token")
+
+
+def validate_refresh_token(token: str) -> str:
+    return _validate_oauth_token(token, "Refresh token")
+
+
+def validate_expires_in(expires_in: object) -> int:
+    """Return a strictly positive integer token lifetime."""
+    if isinstance(expires_in, bool) or not isinstance(expires_in, int) or expires_in <= 0:
+        raise ValueError("Token expiry is missing or malformed.")
+    return expires_in
 
 
 def build_provisioning_payload(token: str) -> str:
@@ -64,7 +99,44 @@ def build_provisioning_payload(token: str) -> str:
     return payload
 
 
-def write_provisioning_qr(token: str, output: Path, *, overwrite: bool = False) -> None:
+def build_provisioning_payload_v2(
+    client_id: str,
+    client_secret: str,
+    access_token: str,
+    refresh_token: str,
+    expires_in: int,
+) -> str:
+    """Build a v2 bundle containing the complete validated OAuth credentials."""
+    validated_client_id = validate_client_credential(client_id, "Client ID")
+    validated_client_secret = validate_client_credential(client_secret, "Client secret")
+    validated_access_token = validate_access_token(access_token)
+    validated_refresh_token = validate_refresh_token(refresh_token)
+    validated_expires_in = validate_expires_in(expires_in)
+    payload = "whoof://provision?" + urlencode(
+        {
+            "v": "2",
+            "client_id": validated_client_id,
+            "client_secret": validated_client_secret,
+            "access_token": validated_access_token,
+            "refresh_token": validated_refresh_token,
+            "expires_in": str(validated_expires_in),
+        }
+    )
+    if len(payload) > MAX_PAYLOAD_LENGTH:
+        raise ValueError("OAuth credentials are too large for a Whoof provisioning QR code.")
+    return payload
+
+
+def write_provisioning_qr(
+    access_token: str,
+    output: Path,
+    *,
+    refresh_token: str | None = None,
+    expires_in: int | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    overwrite: bool = False,
+) -> None:
     """Write a local, mode-600 PNG containing a versioned provisioning payload."""
     output = output.expanduser()
     if not output.parent.is_dir():
@@ -79,7 +151,20 @@ def write_provisioning_qr(token: str, output: Path, *, overwrite: bool = False) 
         box_size=8,
         border=4,
     )
-    qr.add_data(build_provisioning_payload(token))
+    v2_fields = (client_id, client_secret, refresh_token, expires_in)
+    if all(field is None for field in v2_fields):
+        payload = build_provisioning_payload(access_token)
+    elif any(field is None for field in v2_fields):
+        raise ValueError("Complete OAuth credentials are required for a v2 provisioning QR code.")
+    else:
+        payload = build_provisioning_payload_v2(
+            client_id,
+            client_secret,
+            access_token,
+            refresh_token,
+            expires_in,
+        )
+    qr.add_data(payload)
     qr.make(fit=True)
 
     temporary_path: Path | None = None
@@ -112,8 +197,10 @@ def write_provisioning_qr(token: str, output: Path, *, overwrite: bool = False) 
 
 
 def validate_client_credential(value: str, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is missing or malformed.")
     normalized = value.strip()
-    if not normalized or any(character.isspace() for character in normalized):
+    if not normalized or any(not 0x21 <= ord(character) <= 0x7E for character in normalized):
         raise ValueError(f"{label} is missing or malformed.")
     return normalized
 
@@ -226,6 +313,43 @@ def _oauth_http_error_message(
     return status_message
 
 
+def parse_oauth_token_response(response_body: bytes | str) -> OAuthTokens:
+    """Parse and strictly validate the token response fields used by Whoof."""
+    try:
+        token_response = json.loads(response_body)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OAuthError("WHOOP returned an invalid token response.") from error
+    if not isinstance(token_response, dict):
+        raise OAuthError("WHOOP returned an invalid token response.")
+
+    access_token = token_response.get("access_token")
+    if not isinstance(access_token, str):
+        raise OAuthError("WHOOP did not return an access token.")
+    try:
+        validated_access_token = validate_access_token(access_token)
+    except ValueError as error:
+        raise OAuthError("WHOOP returned an invalid access token.") from error
+
+    refresh_token = token_response.get("refresh_token")
+    if not isinstance(refresh_token, str):
+        raise OAuthError("WHOOP did not return a refresh token.")
+    try:
+        validated_refresh_token = validate_refresh_token(refresh_token)
+    except ValueError as error:
+        raise OAuthError("WHOOP returned an invalid refresh token.") from error
+
+    try:
+        validated_expires_in = validate_expires_in(token_response.get("expires_in"))
+    except ValueError as error:
+        raise OAuthError("WHOOP returned an invalid token expiry.") from error
+
+    return OAuthTokens(
+        access_token=validated_access_token,
+        refresh_token=validated_refresh_token,
+        expires_in=validated_expires_in,
+    )
+
+
 class _CallbackServer(http.server.HTTPServer):
     allow_reuse_address = False
 
@@ -290,14 +414,20 @@ def wait_for_callback(
     return result["code"]
 
 
-def exchange_authorization_code(code: str, client_id: str, client_secret: str) -> str:
-    """Exchange a one-time code for an access token using WHOOP's documented endpoint."""
+def exchange_authorization_code(
+    code: str,
+    client_id: str,
+    client_secret: str,
+) -> OAuthCredentials:
+    """Exchange a one-time code for validated OAuth credentials."""
+    validated_client_id = validate_client_credential(client_id, "Client ID")
+    validated_client_secret = validate_client_credential(client_secret, "Client secret")
     form = urlencode(
         {
             "grant_type": "authorization_code",
             "code": code,
-            "client_id": validate_client_credential(client_id, "Client ID"),
-            "client_secret": validate_client_credential(client_secret, "Client secret"),
+            "client_id": validated_client_id,
+            "client_secret": validated_client_secret,
             "redirect_uri": REDIRECT_URI,
         }
     ).encode("ascii")
@@ -318,7 +448,7 @@ def exchange_authorization_code(code: str, client_id: str, client_secret: str) -
         raise OAuthError(
             _oauth_http_error_message(
                 error,
-                sensitive_values=(code, client_id, client_secret),
+                sensitive_values=(code, validated_client_id, validated_client_secret),
             )
         ) from error
     except URLError as error:
@@ -326,16 +456,14 @@ def exchange_authorization_code(code: str, client_id: str, client_secret: str) -
     except OSError as error:
         raise OAuthError("WHOOP token exchange failed due to a local network error.") from error
 
-    try:
-        token_response = json.loads(response_body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise OAuthError("WHOOP returned an invalid token response.") from error
-    if not isinstance(token_response, dict):
-        raise OAuthError("WHOOP returned an invalid token response.")
-    access_token = token_response.get("access_token")
-    if not isinstance(access_token, str):
-        raise OAuthError("WHOOP did not return an access token.")
-    return validate_access_token(access_token)
+    tokens = parse_oauth_token_response(response_body)
+    return OAuthCredentials(
+        client_id=validated_client_id,
+        client_secret=validated_client_secret,
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        expires_in=tokens.expires_in,
+    )
 
 
 def authorize_and_exchange(
@@ -344,8 +472,8 @@ def authorize_and_exchange(
     *,
     browser_open: Callable[[str], bool] = webbrowser.open,
     callback_waiter: Callable[..., str] = wait_for_callback,
-    token_exchanger: Callable[[str, str, str], str] = exchange_authorization_code,
-) -> str:
+    token_exchanger: Callable[[str, str, str], OAuthCredentials] = exchange_authorization_code,
+) -> OAuthCredentials:
     """Run one OAuth attempt without persisting client credentials or token data."""
     client_id = validate_client_credential(client_id, "Client ID")
     client_secret = validate_client_credential(client_secret, "Client secret")
@@ -384,8 +512,16 @@ def main() -> int:
     try:
         client_id = input("WHOOP client ID: ")
         client_secret = getpass.getpass("WHOOP client secret (input hidden): ")
-        token = authorize_and_exchange(client_id, client_secret)
-        write_provisioning_qr(token, args.output, overwrite=args.overwrite)
+        tokens = authorize_and_exchange(client_id, client_secret)
+        write_provisioning_qr(
+            tokens.access_token,
+            args.output,
+            client_id=tokens.client_id,
+            client_secret=tokens.client_secret,
+            refresh_token=tokens.refresh_token,
+            expires_in=tokens.expires_in,
+            overwrite=args.overwrite,
+        )
     except (EOFError, KeyboardInterrupt):
         raise SystemExit("Authorization cancelled.") from None
     except (FileExistsError, FileNotFoundError, ValueError, OSError, OAuthError) as error:
