@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: read
 
 jobs:
   test:
@@ -27,9 +26,4 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
 
       - name: Tool unit tests
-        # The SDK's keyboard library is on Light's GitHub Packages, which needs a token
-        # with read:packages. GH_PACKAGES_TOKEN is used when set, else the workflow token.
-        env:
-          GH_PACKAGES_USER: ${{ github.actor }}
-          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
         run: ./gradlew :tool:testDebugUnitTest

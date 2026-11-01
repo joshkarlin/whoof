@@ -82,9 +82,7 @@ Push a tag such as `v0.2.0`, or `v0.2.0-rc.1` for a prerelease. The release work
 `versionCode` from the tag, writes it and the base `major.minor.patch` version into
 `tool/lighttool.toml` (the SDK rejects prerelease suffixes there), runs the tool's tests, and
 attaches the debug APK to a GitHub Release (see [Local SDK signing](#local-sdk-signing) for why
-it is the debug build). CI runs the same tests on every push to `main`. Both
-workflows read Light's keyboard package from GitHub Packages, using the `GH_PACKAGES_TOKEN`
-secret (a token with `read:packages`) when it is set and the workflow token otherwise.
+it is the debug build). CI runs the same tests on every push to `main`.
 
 ### Sign in on the phone
 

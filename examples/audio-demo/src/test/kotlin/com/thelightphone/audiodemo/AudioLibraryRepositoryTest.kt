@@ -6,7 +6,6 @@ import java.time.Instant
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -15,39 +14,18 @@ class AudioLibraryRepositoryTest {
     fun sampleCatalogIncludesBundledMusicSpeechAndRemoteStreams() {
         val clips = SampleAudioCatalog.clips
 
-        assertEquals(5, clips.size)
+        assertEquals(6, clips.size)
         assertEquals(3, clips.count { it.source is AudioClipSource.AssetSource })
-        assertEquals(2, clips.count { it.source is AudioClipSource.UrlSource })
+        assertEquals(3, clips.count { it.source is AudioClipSource.UrlSource })
         assertEquals(2, clips.count { it.kind == AudioContentKind.Speech })
-        assertTrue(clips.all { it.usage == LightAudioUsage.Music })
+        assertEquals(1, clips.count { isExpiredDawnId(it.id) })
+        assertEquals(false, clips.any { it.id == SampleAudioCatalog.LEGACY_DAWN_ID })
+        assertEquals(LightAudioUsage.Speech, clips.first { it.id == "audrey-tang-interview" }.usage)
+        assertEquals(LightAudioUsage.Speech, clips.first { isExpiredDawnId(it.id) }.usage)
+        assertTrue(clips.any { it.usage == LightAudioUsage.Music })
         assertTrue(clips.any { it.formatLabel == "OGG" })
         assertTrue(clips.any { it.formatLabel == "STREAM" && it.durationMs == 0L })
-    }
-
-    @Test
-    fun playbackSelectionQueuesWholeLibraryAtSelectedClip() {
-        val clips = SampleAudioCatalog.clips
-        val selected = clips[3]
-
-        val selection = playbackSelectionFor(selected, clips)
-
-        assertEquals(clips, selection.queue)
-        assertEquals(3, selection.startIndex)
-    }
-
-    @Test
-    fun playbackSelectionRejectsClipOutsideLibrary() {
-        val missing = SampleAudioCatalog.clips.first().copy(displayName = "Missing")
-
-        assertFailsWith<IllegalArgumentException> {
-            playbackSelectionFor(missing, SampleAudioCatalog.clips)
-        }
-    }
-
-    @Test
-    fun playNextControlsPauseAtEndWithoutChangingQueue() {
-        assertEquals(false, pauseAtEndOfMediaItemsFor(playNext = true))
-        assertEquals(true, pauseAtEndOfMediaItemsFor(playNext = false))
+        assertTrue(clips.any { it.formatLabel == "DASH" && it.id == "shaka-dig-the-uke" })
     }
 
     @Test

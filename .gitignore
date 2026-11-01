@@ -57,3 +57,6 @@ replay_pid*.log
 /.venv/
 /whoof-provision.png
 /pw
+
+### Signing keys ###
+/signer/keys/

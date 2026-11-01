@@ -53,21 +53,24 @@ internal class LightWorkBackgroundSync(private val context: SealedLightContext) 
  * the account session's single-flight token refresh apply and a foreground and background sync
  * never overlap.
  */
+// Nothing is reported back: the job's output is not read and must not carry account data.
+private val DONE = LightJobResult.Success(outputFilePath = null, message = null)
+
 internal suspend fun runBackgroundSync(repository: WhoofRepository): LightJobResult {
     try {
-        if (!repository.isSignedIn()) return LightJobResult.Success()
+        if (!repository.isSignedIn()) return DONE
         repository.sync()
-        return LightJobResult.Success()
+        return DONE
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (error: PrivateWhoopException) {
         // Reconnect, rate limit, and other definite failures wait for the next interval; Today
         // shows SIGN IN when the session is gone. Only an unreachable service is worth a backoff retry.
-        return if (error.reason == PrivateWhoopError.Unavailable) LightJobResult.Retry else LightJobResult.Success()
+        return if (error.reason == PrivateWhoopError.Unavailable) LightJobResult.Retry else DONE
     } catch (error: WhoopApiException) {
-        return if (error.reason == WhoopApiError.Unavailable) LightJobResult.Retry else LightJobResult.Success()
+        return if (error.reason == WhoopApiError.Unavailable) LightJobResult.Retry else DONE
     } catch (error: Exception) {
-        return if (error.isOffline()) LightJobResult.Retry else LightJobResult.Success()
+        return if (error.isOffline()) LightJobResult.Retry else DONE
     }
 }
 
