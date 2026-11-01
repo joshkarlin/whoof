@@ -10,13 +10,14 @@ Light.
 
 Whoof processes:
 
-- WHOOP Developer OAuth credentials provisioned by a locally generated QR code: access and refresh
-  tokens, the user's developer client ID/secret, and token lifetime metadata.
-- Recovery, cycle/strain, sleep, and workout information returned by the official WHOOP Developer
-  API for display by the application.
+- WHOOP OAuth credentials that the user provisions by scanning a locally generated QR code: the
+  user's own WHOOP Developer client ID and secret, an access token, and a rotating refresh token.
+- Recovery, cycle (day strain), sleep, and workout records returned for that user by the official
+  WHOOP Developer API, including scores, heart-rate values, sleep-stage totals, and workout
+  heart-rate zone durations.
 
-The current helper requests `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, and `offline`.
-It does not request profile or body-measurement scopes.
+Whoof requests the `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, and `offline`
+OAuth scopes. It does not request profile or body-measurement access.
 
 An experimental, separate private-API backend is being prepared for app UI integration. When used,
 it processes an account access/refresh session and a user-selected activity's sport, time window,
@@ -26,10 +27,10 @@ Developer OAuth and can grant broader account access; only provision them on a t
 
 ## How data is used
 
-Whoof uses Developer OAuth credentials to request and display the authorized WHOOP data and refresh
-access directly with WHOOP. The experimental private integration authenticates directly with
-WHOOP, verifies account access, and creates an activity only after explicit user confirmation. It
-does not control or pair with the strap. Whoof does not use WHOOP data for advertising,
+Whoof uses Developer OAuth credentials only to request the user's records directly from the official
+WHOOP API and display them on the Light Phone. The experimental private integration authenticates
+directly with WHOOP, verifies account access, and creates an activity only after explicit user
+confirmation. It does not control or pair with the strap. Whoof does not use WHOOP data for advertising,
 profiling, medical advice, or any unrelated purpose.
 
 Whoof is a general-wellness tool, not a medical device. Its output must not be used to make medical
@@ -37,15 +38,21 @@ decisions.
 
 ## Storage and retention
 
-Provisioned credentials are encrypted on the Light Phone with an AES-GCM key held by Android
+Credentials are stored only on the user's Light Phone, encrypted with an AES-GCM key held by Android
 Keystore. The experimental private backend stores its session and one draft/submission record in
-a separate encrypted preference record. Current display responses are not persisted to a local
-health-record database.
+a separate encrypted preference record.
 
-Public OAuth disconnect removes its local credentials. Private disconnect removes its credentials
-but retains an attempted-submission marker to prevent accidental replay; explicit private local-data
-deletion also removes that marker. These operations are independent. Uninstalling Whoof deletes its
-local application data. Access already granted to the WHOOP developer application may be revoked through the
+WHOOP records from the last 30 days are cached in a local database on the Light Phone so the
+application remains useful offline. Records older than 30 days are deleted at the next successful
+synchronization. The time of the last successful synchronization is stored as a nonsensitive
+preference. The cache is not encrypted separately from Android's application-private storage.
+
+Disconnecting in Whoof (Settings, then "Disconnect and delete data") deletes the stored Developer
+OAuth credentials, the cached WHOOP records, and the synchronization time. Private disconnect removes
+its credentials but retains an attempted-submission marker to prevent accidental replay; explicit
+private local-data deletion also removes that marker. These operations are independent. Uninstalling
+Whoof deletes its local application data. Access already granted to the WHOOP application may also be
+revoked through the
 user's WHOOP account or by deleting the application in the WHOOP Developer Dashboard.
 
 The optional local Python helpers run on the user's computer. They store a private account session
