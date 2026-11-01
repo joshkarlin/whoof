@@ -160,7 +160,7 @@ class WhoopPrivateClientTest {
         assertReason(PrivateWhoopError.SubmissionUncertain) {
             malformedReceipt.createActivity(session(), payload(), "Europe/London")
         }
-        val rejected = WhoopPrivateClient(FakeExecutor(response(422, "sensitive server body")), { NOW })
+        val rejected = WhoopPrivateClient(FakeExecutor(response(400, "sensitive server body")), { NOW })
         val exception = assertFailsWith<PrivateWhoopException> {
             rejected.createActivity(session(), payload(), "Europe/London")
         }
@@ -176,6 +176,50 @@ class WhoopPrivateClientTest {
         val oversizedReceipt = WhoopPrivateClient(FakeExecutor(response(200, " ".repeat(1_048_577))), { NOW })
         assertReason(PrivateWhoopError.SubmissionUncertain) {
             oversizedReceipt.createActivity(session(), payload(), "Europe/London")
+        }
+    }
+
+    @Test
+    fun activityConflictAndTooShortAreDefiniteErrors() = runTest {
+        listOf(409 to PrivateWhoopError.Overlap, 422 to PrivateWhoopError.TooShort).forEach { (status, reason) ->
+            val client = WhoopPrivateClient(FakeExecutor(response(status, "sensitive server body")), { NOW })
+            assertReason(reason) { client.createActivity(session(), payload(), "Europe/London") }
+        }
+    }
+
+    @Test
+    fun deleteUsesFixedUrlMethodAndHeadersAndAcceptsEmptySuccess() = runTest {
+        val id = "00000000-0000-4000-8000-000000000002"
+        listOf(200, 204).forEach { status ->
+            val executor = FakeExecutor(response(status, ""))
+            WhoopPrivateClient(executor, { NOW }).deleteActivity(session(), id)
+            val request = executor.requests.single()
+            assertEquals("DELETE", request.method)
+            assertEquals("https://api.prod.whoop.com/core-details-bff/v1/cardio-details?activityId=$id&apiVersion=7", request.url)
+            assertNull(request.body)
+            assertEquals("Bearer $ACCESS", request.headers["Authorization"])
+            assertEquals("com.whoop.iphone", request.headers["x-whoop-bundle-name"])
+        }
+    }
+
+    @Test
+    fun deleteRejectsNonCanonicalIdsBeforeSendingAndMapsStatuses() = runTest {
+        val executor = FakeExecutor()
+        val client = WhoopPrivateClient(executor, { NOW })
+        listOf("", "not-a-uuid", "00000000-0000-4000-8000-00000000000A", "x&apiVersion=1").forEach {
+            assertReason(PrivateWhoopError.InvalidInput) { client.deleteActivity(session(), it) }
+        }
+        assertTrue(executor.requests.isEmpty())
+
+        val id = "00000000-0000-4000-8000-000000000002"
+        mapOf(
+            404 to PrivateWhoopError.NotFound, 401 to PrivateWhoopError.Unauthorized,
+            403 to PrivateWhoopError.Unauthorized, 429 to PrivateWhoopError.RateLimited,
+            400 to PrivateWhoopError.Rejected, 500 to PrivateWhoopError.Unavailable,
+            302 to PrivateWhoopError.InvalidResponse,
+        ).forEach { (status, reason) ->
+            val failing = WhoopPrivateClient(FakeExecutor(response(status, "sensitive")), { NOW })
+            assertReason(reason) { failing.deleteActivity(session(), id) }
         }
     }
 

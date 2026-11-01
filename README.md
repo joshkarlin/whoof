@@ -2,7 +2,7 @@
 
 Whoof is an unofficial WHOOP companion for the Light Phone III. It is intended for its developers and other technically capable users, rather than as a consumer product.
 
-The official WHOOP app on another phone remains responsible for pairing with the strap, synchronizing sensor data, updating firmware, and sending data to WHOOP. Whoof reads the resulting recovery, sleep, strain, and workout data through the official WHOOP Developer API and presents a focused Light Phone interface.
+The official WHOOP app on another phone remains responsible for pairing with the strap, synchronizing sensor data, updating firmware, and sending data to WHOOP. Whoof signs in to your own WHOOP account and reads the resulting recovery, sleep, strain, and workout data, presenting a focused Light Phone interface. It uses the account session of WHOOP's mobile app (not the public Developer API's OAuth); that session reaches the same Developer v2 read endpoints.
 
 Whoof is not affiliated with or endorsed by WHOOP or Light. It is a general-wellness tool, not a medical device, and must not be used to make medical decisions.
 
@@ -10,13 +10,15 @@ See the [privacy policy](PRIVACY.md) for the data Whoof processes and stores.
 
 ## Status
 
-Whoof is an early, developer-oriented build. The Light SDK tool accepts a locally generated v2 provisioning QR code, stores the WHOOP OAuth credentials encrypted on-device, synchronizes the last 14 days of recovery, cycle, sleep, and workout records into a local Room cache, and keeps the last 30 days for offline viewing.
+Whoof is an early, developer-oriented build. It has one sign-in: your WHOOP account, entered on the phone (email, password, and a verification code if WHOOP asks) or by scanning a local account QR code made by `setup/provision_private_session.py`. The session is stored encrypted on-device. Whoof synchronizes the last 14 days of recovery, cycle, sleep, and workout records into a local Room cache and keeps the last 30 days for offline viewing.
 
-The Today screen shows recovery, strain, and sleep dials, HRV and resting heart rate with a trend against the previous seven days, time asleep, and the day's WHOOP activities with heart-rate zone bars. Only the activity list scrolls. Each dial opens a history screen for that metric; a day in strain history opens that day's activities, and tapping a day in sleep history expands its stage breakdown, sleep need, and respiratory rate. Pulling down on Today starts a sync and reveals WHOOP's latest record update separately from Whoof's last successful sync; sync failures stay visible beneath the activities. Settings provides manual sync, token replacement (which clears the previous cache), and a confirmed disconnection that deletes local data.
+Today's data comes from WHOOP's `/developer/v2/` read endpoints (cycle, recovery, sleep, workout), authorized with the account session's bearer token and the same iOS-style headers the private client uses. A read-only check on 2026-11-01 confirmed that these endpoints return the public Developer API v2 shapes (records plus `next_token`) for a private-session token. That check was made from a computer; the integration is implemented and unit-tested but **unverified on the LP3**.
 
-OAuth authorization remains on the developer's local computer rather than inside the Light Phone app. Serialized on-device refresh-token rotation is implemented and unit-tested, but still requires live device validation. Whoof synchronizes when it opens and when Today is shown again after five minutes. After a failed sync, automatic retries back off from five minutes to one hour, and a WHOOP rate-limit response holds automatic sync for 30 minutes; Sync now in Settings always tries immediately. Periodic background synchronization is not yet implemented.
+The Today screen shows recovery, strain, and sleep dials, HRV and resting heart rate with a trend against the previous seven days, time asleep, and the day's WHOOP activities with heart-rate zone bars. Only the activity list scrolls. Each dial opens a history screen for that metric; a day in strain history opens that day's activities, and tapping a day in sleep history expands its stage breakdown, sleep need, and respiratory rate. Pulling down on Today starts a sync and reveals WHOOP's latest record update separately from Whoof's last successful sync; sync failures stay visible beneath the activities. When signed out, Today shows a message and a SIGN IN button. Settings provides manual sync, the WHOOP account screen (SIGN OUT, which also clears cached records, the sync time, the activity timer, and recent sports), and a confirmed Delete local data that additionally removes the stored no-replay submission marker.
 
-Whoof cannot start, stop, or log activities. The WHOOP Developer API is read-only, so activities come from the official WHOOP app or WHOOP's automatic detection.
+The access token is refreshed on-device when within 60 seconds of expiry, and once after a rejected read; refresh tokens rotate and each rotation is persisted immediately. If the session cannot be refreshed, Today asks you to sign in again. Whoof synchronizes when it opens and when Today is shown again after five minutes. After a failed sync, automatic retries back off from five minutes to one hour, and a WHOOP rate-limit response holds automatic sync for 30 minutes; Sync now in Settings always tries immediately. Periodic background synchronization is not yet implemented; when it is added it must use the same account-session token path and do nothing while signed out.
+
+Whoof can log a completed or timed activity (and delete one) through WHOOP's private activity endpoints; see [the private-API app notes](docs/private-api-app.md). It cannot start or stop strap sessions.
 
 The initial architecture is deliberately constrained to capabilities available in the Light SDK so that the project can be considered for Light's community-tool build and submission process.
 
@@ -33,10 +35,12 @@ The initial architecture is deliberately constrained to capabilities available i
 ### Operating model
 
 - The WHOOP strap remains paired with the official WHOOP app on another device
-- Each Whoof user creates and owns a WHOOP Developer application
-- OAuth credentials are supplied at runtime and are never built into Whoof
-- Whoof communicates directly with WHOOP; the documented Developer API remains the normal read path, with a separate experimental private path for activity creation
+- Each Whoof user signs in with their own WHOOP account; no credentials or client secrets are built into Whoof
+- There is no WHOOP Developer application, client ID/secret, or OAuth provisioning step. The earlier Developer-API OAuth path was removed on 2026-11-01
+- Whoof communicates directly with WHOOP using the account session, for both reads and activity logging
 - Whoof has no developer-operated backend, account system, telemetry, or data relay
+
+The account session is broader than a Developer API token: it can act on the whole WHOOP account, not only read the four data domains. Whoof only reads the four collections and logs/deletes activities, but anyone who holds the session or its QR code can do more. WHOOP may change or restrict this unofficial access at any time.
 
 ### Non-goals for the initial version
 
@@ -49,41 +53,30 @@ The initial architecture is deliberately constrained to capabilities available i
 
 A direct-Bluetooth, fully on-device implementation similar to NOOP may be researched separately. It is not part of the initial architecture because it would take ownership of the strap and currently requires Bluetooth and persistent-service capabilities that the Light SDK does not expose.
 
-## POC Setup
-
-The local setup helper performs the WHOOP Authorization Code flow in your browser, receives the one-time authorization code on a loopback HTTP server, exchanges it directly with WHOOP, and generates the existing `whoof://` provisioning QR code. Postman is not required.
-
-The current helper requests `read:recovery read:cycles read:sleep read:workout offline`. These are the read-only data domains committed to the roadmap, and requesting them together avoids repeating provisioning as the Today and history screens are added. The `offline` scope is required for WHOOP to issue the rotating refresh token used for on-device refresh. Whoof does not request `read:profile` or `read:body_measurement`. Each developer or user must use a WHOOP Developer application they control; the helper does not send credentials to a Whoof server.
+## Setup
 
 ### Before you start
 
 - Keep the official WHOOP app set up on another phone so it remains responsible for strap pairing and synchronization.
-- Create or use a WHOOP Developer application that you control, following [WHOOP's getting-started documentation](https://developer.whoop.com/docs/developing/getting-started/).
-- In the WHOOP Developer Dashboard, register this redirect URI exactly:
-  `http://127.0.0.1:8765/callback`
-- Request or configure `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, and `offline` only.
-- Set the privacy policy URL to `https://github.com/joshkarlin/whoof/blob/main/PRIVACY.md` and provide a contact email that you monitor.
-- Install [uv](https://docs.astral.sh/uv/getting-started/installation/).
+- You need a WHOOP account. There is no developer account, client ID, or client secret to create.
 
-The WHOOP Developer Dashboard accepted this fixed loopback redirect during POC testing on August 2, 2026. The helper deliberately fixes the host, port, and path so the registered value and request value cannot drift. Any future redirect change must be made in both the dashboard and this helper.
+### Sign in on the phone
 
-### Run local provisioning
+Open Whoof and choose SIGN IN on Today. Enter your WHOOP email and password and, if WHOOP sends one, the verification code. The SDK text editor does not mask the password while you type it. Earlier direct password attempts returned HTTP 401; if that happens to you, use the QR route.
 
-From the repository root:
+### Sign in with an account QR
+
+On a computer you trust, generate a one-time QR code from a local WHOOP browser session (see [the private-API proof of concept](docs/private-api-poc.md)):
 
 ```sh
-uv run --frozen python setup/provision_access_token.py --output ./whoof-provision.png
+uv run --frozen python setup/provision_private_session.py
 ```
 
-The helper prompts for the client ID and prompts for the client secret with terminal echo disabled. It opens the WHOOP authorization page in your default browser. After you authorize, WHOOP redirects to the local callback, the helper validates a cryptographically random `state` value, and it exchanges the authorization code at WHOOP's documented endpoints. The client ID and secret are accepted only in memory; they are not command-line arguments, written to disk, or logged. The client secret and access token are never placed in a URL; the browser URL contains only WHOOP's required authorization parameters, including `client_id`, `redirect_uri`, `scope`, and `state`. Authorization codes are not printed or persisted.
+The helper writes `local/private-api/whoof-private-provision.png`. On the phone choose SIGN IN, then the camera icon (SCAN ACCOUNT QR). The default `v=2` QR holds only a refresh token; the phone exchanges it, so it is single-use and the session saved on the computer stops working. The QR is plaintext and grants control of your WHOOP account: delete it after scanning and never email, commit, back up, upload, or generate it with an online service.
 
-The helper has a bounded five-minute callback timeout and listens only on `127.0.0.1:8765`. It requests `read:recovery read:cycles read:sleep read:workout offline`. The QR is generated locally with the Python `qrcode` package; do not paste credentials into an online QR generator or upload the generated image to a QR service.
+### Signing out and deleting data
 
-Open the local `whoof-provision.png` on the computer and scan it from Whoof's `CONNECT WHOOP` screen. The v2 image contains the developer client ID and secret plus access and refresh tokens. It grants control over this WHOOP integration and must be treated like a password. Delete it after scanning and do not email, commit, back up, or otherwise share it. The helper refuses to overwrite an existing image unless `--overwrite` is supplied explicitly.
-
-### Token lifetime and replacement
-
-Whoof now performs one serialized refresh after an API request returns `401`, persists WHOOP's replacement token pair, and retries the original request once. Refresh has unit and build verification but still requires live on-device validation with a v2 QR. Until that validation succeeds, retain the ability to repeat local authorization and provision a replacement QR.
+Settings > WHOOP account > SIGN OUT ends the session and clears the cache, sync time, activity timer, and recent sports. Settings > Delete local data does the same and also removes the stored no-replay activity-submission marker (confirmation required). Neither revokes the session on WHOOP's servers; to invalidate it, change your WHOOP password or sign out of other sessions in WHOOP.
 
 ## Architecture
 
@@ -106,7 +99,7 @@ whoof/
 
 ### Light tool
 
-The Light Phone application will use only SDK-supported facilities:
+The Light Phone application uses only SDK-supported facilities:
 
 - Kotlin and Compose
 - Light SDK UI and navigation primitives
@@ -114,33 +107,32 @@ The Light Phone application will use only SDK-supported facilities:
 - Kotlin serialization for API payloads
 - Room for cached WHOOP records
 - DataStore for nonsensitive settings and synchronization metadata
-- Android Keystore and AES-GCM for OAuth credentials
-- `LightWork` for unique periodic synchronization
-- `LightQrCodeScanner` for provisioning
+- Android Keystore and AES-GCM for the account session
+- `LightWork` for unique periodic synchronization (planned)
+- `LightQrCodeScanner` for the account QR
 
 Expected permissions are `INTERNET`, `ACCESS_NETWORK_STATE`, and `CAMERA`. No custom Android manifest, service, receiver, or unsupported Android API should be required.
 
 ### Setup helper
 
-The setup helper is not installed on the Light Phone and is not part of the APK. In this POC, OAuth authorization happens locally through the helper's browser and loopback callback; it produces a one-time provisioning bundle. The bundle format is versioned and validated, and the token is not logged.
+The setup helper is not installed on the Light Phone and is not part of the APK. `setup/provision_private_session.py` exports a one-time account QR from a local session; `setup/private_api_poc.py` and `setup/private_read_probe.py` are research tools. The Developer OAuth helper (`provision_access_token.py`) was removed.
 
-### Token handling
+### Session handling
 
-- The QR payload is versioned as `whoof://provision?v=1&access_token=...`.
-- The current v2 payload contains the client ID, client secret, access token, rotating refresh token, and access-token lifetime required for on-device refresh. The parser retains v1 compatibility.
-- The Light SDK tool validates the exact field set before storing all credentials together with Android Keystore-backed AES-GCM.
-- The setup helper never logs the token and sends credentials only to WHOOP's documented OAuth endpoints.
-- A v2 QR exposed before deletion compromises both the user authorization and the developer application secret. Revoke the authorization and rotate the developer client secret in the WHOOP dashboard before provisioning again.
+- The sole credential is the WHOOP account session (access token, rotating refresh token, expiry), stored in an encrypted preference record using Android Keystore AES-GCM.
+- `WhoopPrivateService.accessToken()` is the only source of bearer tokens for reads. It returns the stored token, refreshing first when it is within 60 seconds of expiry, and persists the rotated pair before returning.
+- A read that returns 401 may force one refresh and be retried once; a second 401 means the session must be re-established. Refresh is never retried or run concurrently, and all callers share one operation lock. Activity POSTs never trigger a refresh or retry.
+- Any refresh the account rejects (Unauthorized or Rejected) is reported as "sign in again". Interruption between remote rotation and local persistence may require signing in again.
+- Request headers for all WHOOP calls come from one place (`WhoopPrivateHeaders`).
+- Passwords and verification codes are held in memory only and never persisted or logged.
 
-Serialized refresh and persistence of WHOOP's replacement tokens are implemented. Live token-rotation and interrupted-persistence behavior still require device validation.
-
-### Provisioning threat model
+### Account QR threat model
 
 - The local computer, its browser, the displayed QR image, and the Light Phone are trusted during provisioning; no intermediary service is trusted or required.
-- The QR image is plaintext by necessity and is the highest-risk transient artifact. The helper creates it with owner-only file permissions and never overwrites an existing file implicitly; the user must delete it immediately after a successful scan.
-- Credentials are accepted only from an exact, size-bounded v1 or v2 payload and are encrypted before persistence. Unknown, duplicate, malformed, control-character, and oversized fields are rejected.
-- Android Keystore protects credentials at rest but does not protect a compromised, unlocked device or a malicious process with equivalent application privileges.
-- WHOOP rotates both access and refresh tokens. Future refresh logic must serialize requests and persist the replacement pair atomically; interruption after remote rotation but before local persistence may require reprovisioning.
+- The QR image is plaintext by necessity and is the highest-risk transient artifact. The helper creates it with owner-only file permissions and never overwrites an existing file implicitly; delete it immediately after a successful scan.
+- Payloads are accepted only if exact, size-bounded, and well-formed; unknown, duplicate, malformed, and oversized fields are rejected, and the session is encrypted before persistence.
+- Android Keystore protects the session at rest but does not protect a compromised, unlocked device or a malicious process with equivalent application privileges.
+- WHOOP rotates the refresh token on each use, so the scanned token is single-use.
 
 ## Light submission target
 
@@ -159,11 +151,11 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 
 ## Security and privacy principles
 
-- Request only the read-only OAuth scopes committed to the roadmap; exclude profile and body-measurement access unless a concrete feature later requires them
+- Read only recovery, cycle, sleep, and workout collections (plus the account check and the activity create/delete calls); do not add other endpoints without a README update and review
 - Store health data only on the Light Phone
-- Encrypt OAuth credentials at rest with a non-exportable Keystore key
-- Use TLS exclusively; use documented WHOOP endpoints except for the explicitly scoped experimental private integration
-- Provide explicit API revocation and complete local-data deletion
+- Encrypt the account session at rest with a non-exportable Keystore key
+- Use TLS exclusively and talk only to fixed WHOOP endpoints; the account-session integration is unofficial and undocumented by WHOOP
+- Provide complete local-data deletion; server-side revocation is not implemented
 - Collect no analytics, telemetry, crash reports, or user identifiers
 - Treat API payloads, database exports, screenshots, and logs as sensitive health data
 
@@ -171,7 +163,7 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 
 This checklist is the source of truth for implementation progress. Update it when work starts, completes, or changes scope.
 
-Experimental private-API work includes the local setup helper and a separate Android backend package, currently being prepared for UI integration. Existing screens continue to use the official Developer API. See [the private-API proof of concept](docs/private-api-poc.md) and [Android integration contract](docs/private-api-app.md). Private account credentials are separate from Developer OAuth and grant broader account access.
+Whoof now has a single sign-in, the WHOOP account session described above. See [the private-API proof of concept](docs/private-api-poc.md) and [Android integration notes](docs/private-api-app.md). Account credentials grant broader access than a Developer API token.
 
 - [x] Build and unit-test private-API login, session refresh, and a read-only account check
 - [x] Build and unit-test a local activity preview and explicitly confirmed submission command
@@ -181,33 +173,29 @@ Experimental private-API work includes the local setup helper and a separate And
 - [x] Validate read-only private workout detail, sleep need, strain target, and detailed sleep endpoints ([results and schema notes](docs/private-api-read-tests.md))
 - [x] Implement and unit-test the isolated Android private login/session provisioning, encrypted storage codec, and explicitly confirmed activity backend (46 tests pass in an isolated JVM harness; not device validation)
 - [ ] Verify the full Android build with the private backend (blocked fetching Light keyboard `0.0.16`; GitHub Packages returns 401)
-- [x] Add on-device WHOOP account sign-in (Settings > Sign in to WHOOP: email, password, optional verification code; Cognito `__type` errors mapped to fixed messages; sign out from Settings > WHOOP account; the Sign in camera icon scans the v=2 private-session QR (refresh token only; the phone refreshes and rotates it) from `setup/provision_private_session.py`, unverified on the LP3; browser-session refresh was live-verified from the computer on 2026-11-01 but not from the phone). Unit-tested on the JVM; not yet verified on the LP3
-- [ ] Integrate private activity controls into the UI, then validate account sign-in and one user-selected submission on the Light Phone
+- [x] Add on-device WHOOP account sign-in (Today's SIGN IN: email, password, optional verification code; Cognito `__type` errors mapped to fixed messages; sign out from Settings > WHOOP account; the Sign in camera icon scans the v=2 private-session QR (refresh token only; the phone refreshes and rotates it) from `setup/provision_private_session.py`, unverified on the LP3; browser-session refresh was live-verified from the computer on 2026-11-01 but not from the phone). Unit-tested on the JVM; not yet verified on the LP3
+- [x] Integrate private activity controls into the UI (implemented, unit-tested on the JVM, unverified on the device): Today's ACTIVITY row shows + (or the running timer) when signed in privately; sport search with recents, a persisted START/STOP timer or a past-activity time entry, review with adjustable start/end, and one explicit SUBMIT TO WHOOP (overlap and uncertain-submission handling, never auto-retried); tapping an activity opens it with a confirmed delete from WHOOP that also removes it from the local cache
+- [x] Sport picker redesign (implemented, JVM-tested, unverified on the LP3): opens on the list (no keyboard) with a top-right search icon; FAVOURITES (user-ordered, managed on a Favourites page with add, move up/down, remove), RECENT (up to 5, excluding favourites), then ALL; favourites are stored as nonsensitive DataStore ids and cleared with recents on sign-out and Delete local data
+- [x] Show newly logged activities on Today before WHOOP lists them (implemented, JVM-tested, unverified on the LP3): a submit records a pending row in a separate Room database (`whoof_pending.db`; the SDK database builder cannot register migrations), merged into its cycle with a PENDING label, dropped when sync returns the id or after 48 hours, and cleared on sign-out and Delete local data
+- [ ] Validate activity logging and deletion on the Light Phone with one user-selected submission and one deletion
 
-- [x] Implement the POC access-token provisioning bundle and recovery API call
-- [x] Complete live local OAuth token exchange and QR provisioning
-- [x] Store the provisioned access token encrypted on-device
-- [x] Validate direct on-device WHOOP API access against a live account
-- [x] Display live recovery and resting heart rate data on the Light Phone III
-- [x] Define and threat-model the v2 provisioning bundle with refresh-token support
-- [x] Implement validated v2 provisioning and encrypted storage for the complete refresh credential set
-- [x] Implement and unit-test serialized token refresh and rotating-token persistence
-- [x] Validate v2 provisioning on-device against a live WHOOP account
-- [ ] Validate a live WHOOP token rotation on-device after the provisioned access token expires
-- [x] Add explicit loading, authorization-expired, no-data, offline, and API-error states
+- [x] Developer API OAuth removed (2026-11-01): OAuth credentials, provisioning QR v1/v2, `provision_access_token.py`, the OAuth token coordinator, and Settings "Replace token" are deleted; this is no longer a supported path
+- [x] Today and history via the private account session: reads use the session's bearer token against `/developer/v2/` with the private client's headers (implemented and unit-tested; unverified on the LP3)
+- [ ] Verify on the LP3: sign-in, first sync, refresh near expiry and after a rejected read, sign-out, and Delete local data
+- [x] Add explicit loading, session-expired, no-data, offline, and API-error states
 - [x] Build and validate the Today screen for recovery, strain, sleep, RHR, HRV, and last-sync time
 - [x] Redesign Today with dials, vitals trends, a scrolling activity log, and pull-to-sync (validated by hand on the LP3; screenshots not yet captured)
 - [x] Add per-metric recovery, strain, and sleep history with expandable sleep rows and a day activity screen (validated by hand on the LP3; screenshots not yet captured)
 - [x] Add Room caching and manual refresh (unit-tested; cached display and pull-to-sync validated on the LP3)
 - [ ] Add periodic synchronization through a unique `LightWork` schedule
-- [ ] Add disconnect with complete local-data deletion of credentials, cached records, and sync metadata (implemented and unit-tested; awaiting on-device validation)
-- [ ] Add WHOOP access revocation from the application
-- [ ] Test offline behavior, token expiry, interrupted refresh, token rotation, and API rate limiting
+- [ ] Sign out and Delete local data clear the session, cached records, sync metadata, activity timer, and recents (implemented and unit-tested; awaiting on-device validation)
+- [ ] Add server-side session revocation from the application
+- [ ] Test offline behavior, token expiry, interrupted refresh, token rotation, and API rate limiting on the device
 - [ ] Verify the controlled Light builder and prepare submission documentation
 
 ## Open questions
 
-- Are there unpublished restrictions on using a client secret from an individually provisioned native application?
+- Will WHOOP keep accepting the mobile app's account session on `/developer/v2/` endpoints, and are there rate limits or terms that apply to it?
 - What API update latency should users expect after the official app synchronizes a strap?
 - Which privacy and review documents will Light require for a tool displaying health data?
 - Should the setup helper support only macOS initially, or be cross-platform from its first release?
@@ -223,8 +211,7 @@ Experimental private-API work includes the local setup helper and a separate And
 
 ## References
 
-- [WHOOP Developer documentation](https://developer.whoop.com/)
-- [WHOOP OAuth documentation](https://developer.whoop.com/docs/developing/oauth/)
+- [WHOOP Developer documentation](https://developer.whoop.com/), for the shape of the v2 read responses
 - [WHOOP API reference](https://developer.whoop.com/api/)
 - [Light SDK](https://github.com/lightphone/light-sdk)
 - [NOOP](https://github.com/ryanbr/noop), a separate direct-Bluetooth implementation and research reference

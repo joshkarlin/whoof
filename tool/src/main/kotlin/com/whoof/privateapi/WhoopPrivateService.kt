@@ -12,8 +12,21 @@ internal class WhoopPrivateService(
     private val store: PrivateWhoopStore,
     private val client: WhoopPrivateTransport,
     private val clock: () -> Instant = Instant::now,
-) {
+) : WhoopAccountSession {
     suspend fun state(): PrivateWhoopState = operations.withLock { store.load() }
+
+    override suspend fun isSignedIn(): Boolean = state().session != null
+
+    override suspend fun accessToken(forceRefresh: Boolean, rejectedToken: String?): String = operations.withLock {
+        val state = store.load()
+        val current = state.session ?: throw PrivateWhoopException(PrivateWhoopError.ReconnectRequired)
+        val refreshed = if (forceRefresh && (rejectedToken == null || rejectedToken == current.accessToken)) {
+            refreshState(state)
+        } else {
+            readySession(state)
+        }
+        refreshed.session!!.accessToken
+    }
 
     suspend fun beginLogin(email: String, password: String): PrivateWhoopLoginResult = operations.withLock {
         client.beginLogin(email, password).also { acceptLogin(it) }
@@ -34,14 +47,14 @@ internal class WhoopPrivateService(
         Unit
     }
 
-    suspend fun disconnect() = operations.withLock {
+    override suspend fun disconnect() = operations.withLock {
         // Keep the submission marker across logout so reconnecting cannot silently replay it.
         val state = store.load()
         store.save(state.copy(session = null, draft = state.draft?.takeUnless { it.status == PrivateActivityStatus.Prepared }))
     }
 
     /** Explicit local-data deletion, not a server-side revoke or activity deletion. */
-    suspend fun deleteLocalData(confirmed: Boolean) = operations.withLock {
+    override suspend fun deleteLocalData(confirmed: Boolean) = operations.withLock {
         if (!confirmed) throw PrivateWhoopException(PrivateWhoopError.ConfirmationRequired)
         store.clear()
     }
@@ -57,7 +70,7 @@ internal class WhoopPrivateService(
         if (state.draft?.status == PrivateActivityStatus.Uncertain) {
             throw PrivateWhoopException(PrivateWhoopError.SubmissionUncertain)
         }
-        val draft = PrivateActivityDraft(UUID.randomUUID().toString(), sport, start.toEpochMilli(), end.toEpochMilli(), timeZone.id)
+        val draft = PrivateActivityDraft(UUID.randomUUID().toString(), sport.id, sport.name, start.toEpochMilli(), end.toEpochMilli(), timeZone.id)
         draft.validate(clock())
         store.save(state.copy(draft = draft))
         draft
@@ -109,6 +122,23 @@ internal class WhoopPrivateService(
             throw PrivateWhoopException(PrivateWhoopError.SubmissionUncertain)
         }
         submitted
+    }
+
+    /** Deletes a WHOOP activity. The DELETE is sent once and never retried; NotFound counts as already gone. */
+    suspend fun deleteActivity(activityId: String, confirmed: Boolean) = operations.withLock {
+        if (!confirmed) throw PrivateWhoopException(PrivateWhoopError.ConfirmationRequired)
+        requirePrivate(runCatching { UUID.fromString(activityId).toString() == activityId }.getOrDefault(false))
+        val original = store.load()
+        val ready = authorizedState(original)
+        try {
+            client.deleteActivity(ready.session!!, activityId)
+        } catch (error: PrivateWhoopException) {
+            if (error.reason != PrivateWhoopError.NotFound) throw error
+        }
+        val draft = ready.draft
+        if (draft != null && draft.status == PrivateActivityStatus.Submitted && draft.activityId == activityId) {
+            store.save(ready.copy(draft = null))
+        }
     }
 
     private suspend fun acceptLogin(result: PrivateWhoopLoginResult) {
@@ -183,6 +213,7 @@ internal class WhoopPrivateService(
         // Guards shared DataStore records even if a screen accidentally constructs a second service.
         val operations = Mutex()
         val DEFINITE_REJECTIONS = setOf(PrivateWhoopError.InvalidInput, PrivateWhoopError.Unauthorized,
-            PrivateWhoopError.Rejected, PrivateWhoopError.RateLimited)
+            PrivateWhoopError.Rejected, PrivateWhoopError.RateLimited, PrivateWhoopError.Overlap,
+            PrivateWhoopError.TooShort)
     }
 }

@@ -163,7 +163,8 @@ class WhoopPrivateServiceTest {
     fun payloadUsesMillisecondUtcInstantsAcrossDaylightSavingTransition() {
         val activity = PrivateActivityDraft(
             id = UUID.randomUUID().toString(),
-            sport = PrivateWhoopSport.Running,
+            sportId = 0,
+            sportName = "Running",
             startEpochMillis = Instant.parse("2024-03-31T00:30:00.123Z").toEpochMilli(),
             endEpochMillis = Instant.parse("2024-03-31T01:30:00.456Z").toEpochMilli(),
             timeZone = "Europe/London",
@@ -175,6 +176,82 @@ class WhoopPrivateServiceTest {
         assertEquals("2024-03-31T01:30:00.456Z", payload.endTime)
         assertEquals(0, payload.sportId)
         assertFalse(payload.gpsEnabled)
+    }
+
+    @Test
+    fun overlapAndTooShortCreateErrorsMarkTheDraftRejected() = runBlocking {
+        for (failure in listOf(PrivateWhoopError.Overlap, PrivateWhoopError.TooShort)) {
+            val (service, client, draft) = preparedService()
+            client.createFailure = PrivateWhoopException(failure)
+
+            assertPrivateError(failure) { service.submitActivity(draft.id, confirmed = true) }
+
+            assertEquals(PrivateActivityStatus.Rejected, service.state().draft?.status)
+            assertEquals(1, client.createCount)
+        }
+    }
+
+    @Test
+    fun deleteRequiresConfirmationAndCanonicalUuid() = runBlocking {
+        val id = UUID.randomUUID().toString()
+        val client = FakeWhoopPrivateTransport()
+        val service = service(MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION)), client)
+
+        assertPrivateError(PrivateWhoopError.ConfirmationRequired) { service.deleteActivity(id, confirmed = false) }
+        assertPrivateError(PrivateWhoopError.InvalidInput) { service.deleteActivity(id.uppercase(), confirmed = true) }
+
+        assertEquals(0, client.deletedIds.size)
+        assertEquals(0, client.checkCount)
+    }
+
+    @Test
+    fun deleteRefreshesExpiredSessionFirstAndSendsExactlyOneDelete() = runBlocking {
+        val events = mutableListOf<String>()
+        val id = UUID.randomUUID().toString()
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = session(expiry = NOW.epochSecond)), events)
+        val client = FakeWhoopPrivateTransport(events)
+
+        service(store, client).deleteActivity(id, confirmed = true)
+
+        assertEquals(listOf("refresh", "save:none", "check", "delete"), events)
+        assertEquals(listOf(id), client.deletedIds)
+        assertEquals(client.refreshResult, store.current.session)
+    }
+
+    @Test
+    fun deleteFailuresAreNeverRetried() = runBlocking {
+        for (failure in listOf(PrivateWhoopError.Unauthorized, PrivateWhoopError.Unavailable)) {
+            val client = FakeWhoopPrivateTransport().apply { deleteFailure = PrivateWhoopException(failure) }
+            val service = service(MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION)), client)
+
+            assertPrivateError(failure) { service.deleteActivity(UUID.randomUUID().toString(), confirmed = true) }
+
+            assertEquals(1, client.deletedIds.size)
+            assertEquals(0, client.refreshCount)
+        }
+    }
+
+    @Test
+    fun deleteTreatsNotFoundAsSuccessAndClearsMatchingSubmittedDraft() = runBlocking {
+        val (service, client, draft, store) = preparedServiceWithStore()
+        val submitted = service.submitActivity(draft.id, confirmed = true)
+        client.deleteFailure = PrivateWhoopException(PrivateWhoopError.NotFound)
+
+        service.deleteActivity(submitted.activityId!!, confirmed = true)
+
+        assertEquals(listOf(submitted.activityId), client.deletedIds)
+        assertNull(store.current.draft)
+    }
+
+    @Test
+    fun deleteOfAnotherActivityKeepsTheSubmittedDraft() = runBlocking {
+        val (service, client, draft, store) = preparedServiceWithStore()
+        val submitted = service.submitActivity(draft.id, confirmed = true)
+
+        service.deleteActivity(UUID.randomUUID().toString(), confirmed = true)
+
+        assertEquals(submitted, store.current.draft)
+        assertEquals(1, client.deletedIds.size)
     }
 
     @Test
@@ -197,7 +274,7 @@ class WhoopPrivateServiceTest {
         val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = expired), events)
         val client = FakeWhoopPrivateTransport(events).apply { refreshResult = replacement }
         val service = service(store, client)
-        val draft = service.prepareActivity(PrivateWhoopSport.Running, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
+        val draft = service.prepareActivity(RUNNING, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
         events.clear()
 
         val submitted = service.submitActivity(draft.id, confirmed = true)
@@ -255,7 +332,7 @@ class WhoopPrivateServiceTest {
             createFailure = PrivateWhoopException(PrivateWhoopError.Unauthorized)
         }
         val service = service(store, client)
-        val draft = service.prepareActivity(PrivateWhoopSport.Running, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
+        val draft = service.prepareActivity(RUNNING, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
         events.clear()
 
         assertPrivateError(PrivateWhoopError.Unauthorized) {
@@ -374,7 +451,7 @@ class WhoopPrivateServiceTest {
         val firstService = service(store, client)
         val secondService = service(store, client)
         val draft = firstService.prepareActivity(
-            PrivateWhoopSport.Running, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"),
+            RUNNING, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"),
         )
 
         val first = async { firstService.submitActivity(draft.id, confirmed = true) }
@@ -411,13 +488,13 @@ class WhoopPrivateServiceTest {
         assertPrivateError(PrivateWhoopError.SubmissionUncertain) { service.submitActivity(draft.id, true) }
 
         assertPrivateError(PrivateWhoopError.SubmissionUncertain) {
-            service.prepareActivity(PrivateWhoopSport.Cycling, NOW.minusSeconds(300), NOW, ZoneId.of("UTC"))
+            service.prepareActivity(CYCLING, NOW.minusSeconds(300), NOW, ZoneId.of("UTC"))
         }
         assertPrivateError(PrivateWhoopError.ConfirmationRequired) { service.discardDraft(confirmed = false) }
         service.discardDraft(confirmed = true)
         client.createFailure = null
 
-        val next = service.prepareActivity(PrivateWhoopSport.Cycling, NOW.minusSeconds(300), NOW, ZoneId.of("UTC"))
+        val next = service.prepareActivity(CYCLING, NOW.minusSeconds(300), NOW, ZoneId.of("UTC"))
         assertEquals(PrivateActivityStatus.Prepared, next.status)
         assertNull(store.current.draft?.activityId)
         assertEquals(1, client.createCount)
@@ -458,7 +535,7 @@ class WhoopPrivateServiceTest {
         val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION))
         val client = FakeWhoopPrivateTransport()
         val service = service(store, client)
-        val draft = service.prepareActivity(PrivateWhoopSport.Running, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
+        val draft = service.prepareActivity(RUNNING, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
         return Triple(service, client, draft)
     }
 
@@ -466,8 +543,112 @@ class WhoopPrivateServiceTest {
         val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION))
         val client = FakeWhoopPrivateTransport()
         val service = service(store, client)
-        val draft = service.prepareActivity(PrivateWhoopSport.Running, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
+        val draft = service.prepareActivity(RUNNING, NOW.minusSeconds(600), NOW, ZoneId.of("UTC"))
         return PreparedService(service, client, draft, store)
+    }
+
+    @Test
+    fun accessTokenReturnsTheStoredTokenWithoutRefreshingWhenFresh() = runBlocking {
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION))
+        val client = FakeWhoopPrivateTransport()
+
+        assertEquals(SESSION.accessToken, service(store, client).accessToken())
+
+        assertEquals(0, client.refreshCount)
+        assertEquals(0, store.saveCount)
+    }
+
+    @Test
+    fun accessTokenRefreshesAndPersistsWhenWithinSixtySecondsOfExpiry() = runBlocking {
+        val events = mutableListOf<String>()
+        val nearExpiry = session("original", NOW.plusSeconds(59).epochSecond)
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = nearExpiry), events)
+        val client = FakeWhoopPrivateTransport(events)
+
+        val token = service(store, client).accessToken()
+
+        assertEquals(client.refreshResult.accessToken, token)
+        assertEquals(client.refreshResult, store.current.session)
+        assertEquals(listOf("refresh", "save:none"), events)
+    }
+
+    @Test
+    fun accessTokenRefreshesOnceForConcurrentCallers() = runBlocking {
+        val expired = session("original", NOW.minusSeconds(10).epochSecond)
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = expired))
+        val client = FakeWhoopPrivateTransport()
+        val service = service(store, client)
+
+        val tokens = (1..5).map { async { service.accessToken() } }.map { it.await() }
+
+        assertEquals(1, client.refreshCount)
+        assertEquals(List(5) { client.refreshResult.accessToken }, tokens)
+    }
+
+    @Test
+    fun forcedRefreshRotatesOnceEvenWhenTwoGetsReportTheSameRejectedToken() = runBlocking {
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION))
+        val client = FakeWhoopPrivateTransport()
+        val service = service(store, client)
+
+        val first = async { service.accessToken(forceRefresh = true, rejectedToken = SESSION.accessToken) }
+        val second = async { service.accessToken(forceRefresh = true, rejectedToken = SESSION.accessToken) }
+
+        assertEquals(client.refreshResult.accessToken, first.await())
+        assertEquals(client.refreshResult.accessToken, second.await())
+        assertEquals(1, client.refreshCount)
+        assertEquals(client.refreshResult, store.current.session)
+    }
+
+    @Test
+    fun forcedRefreshWithoutARejectedTokenAlwaysRefreshes() = runBlocking {
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = SESSION))
+        val client = FakeWhoopPrivateTransport()
+
+        service(store, client).accessToken(forceRefresh = true)
+
+        assertEquals(1, client.refreshCount)
+    }
+
+    @Test
+    fun accessTokenMapsRejectedRefreshToReconnectRequiredAndKeepsTheStoredSession() = runBlocking {
+        for (failure in listOf(PrivateWhoopError.Unauthorized, PrivateWhoopError.Rejected)) {
+            val expired = session("original", NOW.minusSeconds(10).epochSecond)
+            val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = expired))
+            val client = FakeWhoopPrivateTransport().apply { refreshFailure = PrivateWhoopException(failure) }
+
+            assertPrivateError(PrivateWhoopError.ReconnectRequired) { service(store, client).accessToken() }
+            assertPrivateError(PrivateWhoopError.ReconnectRequired) {
+                service(store, client).accessToken(forceRefresh = true)
+            }
+
+            assertEquals(expired, store.current.session)
+            assertEquals(0, store.saveCount)
+        }
+    }
+
+    @Test
+    fun accessTokenPropagatesTransientRefreshFailuresWithoutChangingTheSession() = runBlocking {
+        val expired = session("original", NOW.minusSeconds(10).epochSecond)
+        val store = MemoryPrivateWhoopStore(PrivateWhoopState(session = expired))
+        val client = FakeWhoopPrivateTransport().apply {
+            refreshFailure = PrivateWhoopException(PrivateWhoopError.Unavailable)
+        }
+
+        assertPrivateError(PrivateWhoopError.Unavailable) { service(store, client).accessToken() }
+
+        assertEquals(expired, store.current.session)
+    }
+
+    @Test
+    fun accessTokenWithoutASessionRequiresReconnect() = runBlocking {
+        val client = FakeWhoopPrivateTransport()
+
+        assertPrivateError(PrivateWhoopError.ReconnectRequired) {
+            service(MemoryPrivateWhoopStore(), client).accessToken()
+        }
+
+        assertEquals(0, client.refreshCount)
     }
 
     private fun service(store: PrivateWhoopStore, client: FakeWhoopPrivateTransport) =
@@ -484,7 +665,7 @@ class WhoopPrivateServiceTest {
         start: Instant,
         end: Instant,
         timeZone: String = "UTC",
-    ) = PrivateActivityDraft(UUID.randomUUID().toString(), PrivateWhoopSport.Running,
+    ) = PrivateActivityDraft(UUID.randomUUID().toString(), 0, "Running",
         start.toEpochMilli(), end.toEpochMilli(), timeZone)
 
     private suspend fun assertPrivateError(expected: PrivateWhoopError, block: suspend () -> Unit) {
@@ -498,6 +679,8 @@ class WhoopPrivateServiceTest {
     }
 
     private companion object {
+        val RUNNING = PrivateWhoopSports.byId(0)!!
+        val CYCLING = PrivateWhoopSports.byId(1)!!
         val NOW: Instant = Instant.parse("2025-01-01T12:00:00Z")
         val SESSION = session("original", NOW.plusSeconds(3_600).epochSecond)
     }
@@ -539,6 +722,8 @@ private class FakeWhoopPrivateTransport(
     var refreshResult: PrivateWhoopSession = session("replacement", NOW_EPOCH + 3_600)
     var refreshFailure: Throwable? = null
     var createFailure: Throwable? = null
+    var deleteFailure: Throwable? = null
+    val deletedIds = mutableListOf<String>()
     var receipt: String = UUID.randomUUID().toString()
     var beforeCreate: (suspend () -> Unit)? = null
     val checkFailures = mutableListOf<Throwable>()
@@ -591,6 +776,12 @@ private class FakeWhoopPrivateTransport(
         beforeCreate?.invoke()
         createFailure?.let { throw it }
         return receipt
+    }
+
+    override suspend fun deleteActivity(session: PrivateWhoopSession, activityId: String) {
+        events += "delete"
+        deletedIds += activityId
+        deleteFailure?.let { throw it }
     }
 }
 

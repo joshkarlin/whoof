@@ -115,6 +115,9 @@ internal interface WhoopCache {
 
     suspend fun apply(batch: SyncBatch)
 
+    /** Removes one cached workout, such as one just deleted from WHOOP. */
+    suspend fun deleteWorkout(id: String)
+
     suspend fun clear()
 }
 
@@ -176,6 +179,9 @@ internal interface WhoopCacheDao {
 
     @Query("DELETE FROM workouts")
     suspend fun clearWorkouts()
+
+    @Query("DELETE FROM workouts WHERE id = :id")
+    suspend fun deleteWorkoutById(id: String)
 }
 
 @Database(
@@ -214,6 +220,8 @@ internal class RoomWhoopCache(private val database: WhoofDatabase) : WhoopCache 
             dao.pruneWorkouts(batch.retainSinceMillis)
         }
     }
+
+    override suspend fun deleteWorkout(id: String) = dao.deleteWorkoutById(id)
 
     override suspend fun clear() {
         database.withTransaction {

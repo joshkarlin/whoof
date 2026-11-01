@@ -15,6 +15,7 @@ import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
+import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private const val CHART_DAYS = 7
@@ -36,7 +38,10 @@ internal enum class HistoryMetric(val title: String) {
     Sleep("SLEEP"),
 }
 
-internal class DaysViewModel(repository: WhoofRepository) : LightViewModel<Unit>() {
+internal class DaysViewModel(
+    repository: WhoofRepository,
+    private val signedIn: suspend () -> Boolean = { false },
+) : LightViewModel<Boolean>() {
     val days: StateFlow<List<DaySummary>?> = repository.days
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -44,6 +49,16 @@ internal class DaysViewModel(repository: WhoofRepository) : LightViewModel<Unit>
 
     /** The sleep row showing stage details; the newest day until the user picks another, null when collapsed. */
     val expandedSleep: StateFlow<Long?> = _expandedSleep
+
+    private val _canEditActivities = MutableStateFlow(false)
+
+    /** True when a private WHOOP session exists, so activities can be opened and deleted. */
+    val canEditActivities: StateFlow<Boolean> = _canEditActivities
+
+    override fun onScreenShow(screen: SimpleLightScreen<Boolean>) {
+        super.onScreenShow(screen)
+        viewModelScope.launch { _canEditActivities.value = runCatching { signedIn() }.getOrDefault(false) }
+    }
 
     fun toggleSleep(cycleId: Long, expanded: Boolean) {
         _expandedSleep.value = if (expanded) null else cycleId
@@ -54,7 +69,7 @@ internal class MetricHistoryScreen(
     sealedActivity: SealedLightActivity,
     private val metric: HistoryMetric,
     private val repository: WhoofRepository,
-) : LightScreen<Unit, DaysViewModel>(sealedActivity) {
+) : LightScreen<Boolean, DaysViewModel>(sealedActivity) {
     override val viewModelClass: Class<DaysViewModel> = DaysViewModel::class.java
 
     override fun createViewModel(): DaysViewModel = DaysViewModel(repository)
@@ -75,7 +90,7 @@ internal class MetricHistoryScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 1f.gridUnitsAsDp()),
+                    .padding(start = 1f.gridUnitsAsDp()),
             ) {
                 BarChart(
                     bars = recentDays(loaded, maxOf(today, loaded.first().date), CHART_DAYS).map { (date, day) ->
@@ -90,7 +105,9 @@ internal class MetricHistoryScreen(
                         when (metric) {
                             HistoryMetric.Recovery -> RecoveryRow(label, day)
                             HistoryMetric.Strain -> StrainRow(label, day) {
-                                navigateTo({ DayScreen(it, day.cycleId, repository) })
+                                navigateTo({ DayScreen(it, day.cycleId, repository) }) { deleted ->
+                                    if (deleted) goBack(true)
+                                }
                             }
                             HistoryMetric.Sleep -> {
                                 val expanded = day.cycleId == expandedCycle
@@ -108,14 +125,17 @@ internal class DayScreen(
     sealedActivity: SealedLightActivity,
     private val cycleId: Long,
     private val repository: WhoofRepository,
-) : LightScreen<Unit, DaysViewModel>(sealedActivity) {
+) : LightScreen<Boolean, DaysViewModel>(sealedActivity) {
     override val viewModelClass: Class<DaysViewModel> = DaysViewModel::class.java
 
-    override fun createViewModel(): DaysViewModel = DaysViewModel(repository)
+    private val tools = ActivityTools.from(lightContext)
+
+    override fun createViewModel(): DaysViewModel = DaysViewModel(repository) { tools.backend.signedIn() }
 
     @Composable
     override fun Content() {
         val days by viewModel.days.collectAsState()
+        val canEdit by viewModel.canEditActivities.collectAsState()
         val day = days?.firstOrNull { it.cycleId == cycleId }
 
         WhoofPage(title = day?.date?.topBarText(), onBack = { goBack() }) {
@@ -127,10 +147,20 @@ internal class DayScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .padding(horizontal = 1f.gridUnitsAsDp()),
+                        .padding(start = 1f.gridUnitsAsDp()),
                 ) {
                     MetricRow("Day strain", day.strain.strainText(day.cycleState), WhoofColors.Strain)
-                    Activities(day.activities, Modifier.padding(top = 1f.gridUnitsAsDp(), bottom = 1f.gridUnitsAsDp()))
+                    Activities(
+                        day.activities,
+                        Modifier.padding(top = 1f.gridUnitsAsDp(), bottom = 1f.gridUnitsAsDp()),
+                        onActivityClick = if (canEdit) { activity ->
+                            navigateTo({ ActivityScreen(it, activity, repository) }) { deleted ->
+                                if (deleted) goBack(true)
+                            }
+                        } else {
+                            null
+                        },
+                    )
                 }
             }
         }

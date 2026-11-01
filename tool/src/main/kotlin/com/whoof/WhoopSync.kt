@@ -4,6 +4,9 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
+import com.whoof.privateapi.PrivateWhoopError
+import com.whoof.privateapi.PrivateWhoopException
+import com.whoof.privateapi.WhoopAccountSession
 import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.flow.Flow
@@ -45,48 +48,46 @@ internal class DataStoreSyncMetadata(
 
 internal class WhoopSynchronizer(
     private val api: WhoopHistoryClient,
-    private val tokenCoordinator: WhoopTokenCoordinator,
+    private val session: WhoopAccountSession,
     private val cache: WhoopCache,
     private val metadata: SyncMetadataStore,
     private val now: () -> Instant = Instant::now,
 ) {
     private val mutex = Mutex()
 
-    /** Runs [block] while no synchronization is in progress, such as replacing or deleting credentials. */
+    /** Runs [block] while no synchronization is in progress, such as signing out or deleting data. */
     suspend fun <T> exclusive(block: suspend () -> T): T = mutex.withLock { block() }
 
     /** Fetches recent WHOOP records and replaces the cached window. Cache is untouched on failure. */
     suspend fun sync() = mutex.withLock {
         val startedAt = now()
         val cutoffMillis = startedAt.minus(Duration.ofDays(HISTORY_DAYS)).toEpochMilli()
-        val batch = tokenCoordinator.execute { accessToken ->
-            fetchBatch(accessToken, cutoffMillis, startedAt)
-        }
+        val batch = fetchBatch(SyncToken(session), cutoffMillis, startedAt)
         cache.apply(batch)
         metadata.recordSuccess(startedAt.toEpochMilli())
     }
 
     private suspend fun fetchBatch(
-        accessToken: String,
+        token: SyncToken,
         cutoffMillis: Long,
         startedAt: Instant,
     ): SyncBatch {
-        val cycles = fetchWindow<CycleEntity>(cutoffMillis, { it.startMillis }) { token ->
-            api.recentCycles(accessToken, PAGE_LIMIT, token).let { page ->
+        val cycles = fetchWindow<CycleEntity>(cutoffMillis, { it.startMillis }) { next ->
+            token.get { api.recentCycles(it, PAGE_LIMIT, next) }.let { page ->
                 page.records.mapNotNull(CycleRecord::toEntity) to page.nextToken
             }
         }
-        val sleeps = fetchWindow<SleepEntity>(cutoffMillis, { it.startMillis }) { token ->
-            api.recentSleeps(accessToken, PAGE_LIMIT, token).let { page ->
+        val sleeps = fetchWindow<SleepEntity>(cutoffMillis, { it.startMillis }) { next ->
+            token.get { api.recentSleeps(it, PAGE_LIMIT, next) }.let { page ->
                 page.records.mapNotNull(SleepRecord::toEntity) to page.nextToken
             }
         }
-        val workouts = fetchWindow<WorkoutEntity>(cutoffMillis, { it.startMillis }) { token ->
-            api.recentWorkouts(accessToken, PAGE_LIMIT, token).let { page ->
+        val workouts = fetchWindow<WorkoutEntity>(cutoffMillis, { it.startMillis }) { next ->
+            token.get { api.recentWorkouts(it, PAGE_LIMIT, next) }.let { page ->
                 page.records.mapNotNull(WorkoutRecord::toEntity) to page.nextToken
             }
         }
-        val recoveries = api.recentRecoveries(accessToken, PAGE_LIMIT).records.map(RecoveryRecord::toEntity)
+        val recoveries = token.get { api.recentRecoveries(it, PAGE_LIMIT) }.records.map(RecoveryRecord::toEntity)
         return SyncBatch(
             cycles = cycles.records,
             recoveries = recoveries,
@@ -97,6 +98,36 @@ internal class WhoopSynchronizer(
             workoutWindowStartMillis = workouts.windowStartMillis(cutoffMillis) { it.startMillis },
             retainSinceMillis = startedAt.minus(Duration.ofDays(RETAIN_DAYS)).toEpochMilli(),
         )
+    }
+}
+
+/**
+ * Bearer token for one sync. The first 401 on a GET forces a single refresh and retries that GET
+ * once; any further 401, in this call or a later one, means the session must be signed in again.
+ */
+private class SyncToken(private val session: WhoopAccountSession) {
+    private var token: String? = null
+    private var refreshed = false
+
+    suspend fun <T> get(request: suspend (String) -> T): T {
+        val used = token ?: session.accessToken().also { token = it }
+        try {
+            return request(used)
+        } catch (error: WhoopApiException) {
+            if (error.reason != WhoopApiError.Unauthorized) throw error
+        }
+        if (refreshed) throw PrivateWhoopException(PrivateWhoopError.ReconnectRequired)
+        refreshed = true
+        val replacement = session.accessToken(forceRefresh = true, rejectedToken = used)
+        token = replacement
+        try {
+            return request(replacement)
+        } catch (error: WhoopApiException) {
+            if (error.reason == WhoopApiError.Unauthorized) {
+                throw PrivateWhoopException(PrivateWhoopError.ReconnectRequired)
+            }
+            throw error
+        }
     }
 }
 

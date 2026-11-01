@@ -273,8 +273,16 @@ internal fun SectionLabel(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-internal fun ActivityRow(activity: ActivitySummary, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.fillMaxWidth()) {
+internal fun ActivityRow(
+    activity: ActivitySummary,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.lightClickable(onClickLabel = "Open activity", onClick = onClick) else Modifier),
+    ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
             LightText(
                 text = activity.sportName.displaySportName(),
@@ -290,7 +298,8 @@ internal fun ActivityRow(activity: ActivitySummary, modifier: Modifier = Modifie
         }
         Row(modifier = Modifier.fillMaxWidth()) {
             SectionLabel(activity.timeRangeText(), Modifier.weight(1f))
-            activity.averageHeartRate?.let { SectionLabel("AVG $it BPM") }
+            if (activity.awaitingWhoop) SectionLabel("PENDING")
+            else activity.averageHeartRate?.let { SectionLabel("AVG $it BPM") }
         }
         if (activity.zoneFractions.isNotEmpty()) {
             SegmentBar(

@@ -5,10 +5,11 @@ Whoof is an unofficial WHOOP companion for the Light Phone III. It is a develope
 ## Product contract
 
 - The official WHOOP app on another device remains the primary strap client.
-- Use WHOOP's documented Developer API for canonical recovery, sleep, cycle, and workout data.
-- User-authorized private-API work is isolated to `setup/` and the Android `com.whoof.privateapi` package. Its account session is separate from developer OAuth. Activity writes require a user-selected real session and explicit submission; login, provisioning, and connection checks must never create activities. Do not expand this exception to other endpoints without a concrete request.
+- Whoof has one sign-in: the user's own WHOOP account session (email/password/MFA on the phone, or a local account QR). There is no WHOOP Developer application, client ID/secret, or OAuth provisioning; that path was removed and must not return without explicit user approval.
+- Canonical recovery, sleep, cycle, and workout data come from WHOOP's `/developer/v2/` read endpoints, called with the account session's bearer token and the shared iOS-style headers from `WhoopPrivateHeaders`. This is unofficial; do not claim it is WHOOP's supported API.
+- Account-session work is isolated to `setup/` and the Android `com.whoof.privateapi` package. Activity writes require a user-selected real session and explicit submission; login, provisioning, and connection checks must never create activities. Do not expand to other endpoints without a concrete request.
 - Keep private transport, provisioning, persistence, and submission lifecycle code in `tool/src/main/kotlin/com/whoof/privateapi/`; see `docs/private-api-app.md` for the UI integration contract. Coordinate ownership before editing another agent's screens. Never retry an activity POST automatically, including after refresh, timeout, cancellation, or process restart.
-- Each user owns and provisions their own WHOOP Developer credentials.
+- Each user signs in with their own WHOOP account; Whoof never embeds or shares credentials.
 - Do not add a shared backend, credential broker, telemetry service, webhook receiver, or data relay without explicit user approval.
 - Do not add direct WHOOP Bluetooth support to the initial application. Treat it as a separate future research track.
 - Do not claim affiliation with or endorsement by WHOOP or Light.
@@ -31,39 +32,39 @@ The intended repository layout is:
 
 ```text
 tool/   Light SDK application
-setup/  Local OAuth provisioning helper
+setup/  Local account-session provisioning and research helpers
 docs/   Architecture, privacy, setup, and submission documents
 ```
 
 - Keep the setup helper independent from the Android APK and Light builder.
-- The setup helper may perform OAuth locally and generate a one-time provisioning QR code. Transmit credentials only to WHOOP's documented endpoints or the narrowly scoped experimental private-API endpoints authorized above.
+- The setup helper may sign in locally and generate a one-time account QR code. Transmit credentials only to the fixed WHOOP endpoints authorized above.
 - Keep WHOOP transport models separate from persisted entities and UI models.
 - Cache API records in Room so the application remains useful offline.
 - Use DataStore only for nonsensitive preferences, synchronization metadata, or authenticated-encrypted credential/submission blobs. Never store plaintext account sessions or activity drafts there.
-- Use Android Keystore with authenticated encryption for client secrets and OAuth tokens.
-- Centralize API endpoint construction, OAuth behavior, retry policy, and redaction.
+- Use Android Keystore with authenticated encryption for the account session.
+- Centralize API endpoint construction, headers, session refresh behavior, retry policy, and redaction.
 
-## OAuth invariants
+## Account session invariants
 
-WHOOP Developer OAuth refresh tokens rotate. A successful refresh invalidates the previous access and refresh tokens. These invariants govern the existing developer OAuth integration; the experimental account session uses a separate Cognito refresh flow, which normally retains its refresh token and has a fixed session lifetime.
+WHOOP's account session refreshes through Cognito; refresh tokens rotate (the scanned QR refresh token is single-use), and the access token lasts about 24 hours.
 
-- Allow exactly one refresh operation at a time within the process.
-- Route foreground and background API calls through the same token coordinator.
+- Allow exactly one refresh operation at a time within the process, under `WhoopPrivateService`'s operation lock.
+- Route every foreground and background read through `WhoopPrivateService.accessToken()`; never read the stored session elsewhere to call WHOOP.
 - Persist replacement credentials immediately after refresh succeeds.
-- Never retry a refresh concurrently or speculatively.
-- Treat interruption between remote rotation and local persistence as requiring reprovisioning unless WHOOP documents a safe recovery mechanism.
+- A read that returns 401 may force one refresh and retry that GET once per sync. Never refresh or retry around an activity POST or DELETE.
+- Never retry a refresh concurrently or speculatively. A refresh WHOOP rejects means the user must sign in again.
+- Treat interruption between remote rotation and local persistence as requiring a new sign-in unless WHOOP documents a safe recovery mechanism.
 - Validate provisioning bundle versions and required fields before storing anything.
 - Never commit, print, log, snapshot, or include credentials in test fixtures.
 
 ## Security and privacy
 
-- Health records and OAuth credentials are sensitive data.
-- Request only scopes used by implemented product behavior. New scopes require an explicit README update and review.
-- Use documented WHOOP HTTPS endpoints except for the explicitly authorized private-API work.
-- The experimental private-API helper and Android package may call the researched WHOOP authentication, account-read, and activity-creation endpoints. Keep destinations fixed, credentials out of output, and activity submissions free of automatic retries. The additional private detail-read probes remain local research until explicitly integrated.
+- Health records and the account session are sensitive data. The session can act on the whole WHOOP account, so treat it like a password.
+- Read only the collections used by implemented product behavior. New endpoints require an explicit README update and review.
+- Use fixed WHOOP HTTPS endpoints only: authentication, account check, `/developer/v2/` reads, and activity create/delete. Keep credentials out of output and activity submissions free of automatic retries. The additional private detail-read probes remain local research until explicitly integrated.
 - Redact authorization headers, query parameters, tokens, secrets, email addresses, user IDs, and health values from logs and exceptions.
 - Use synthetic or irreversibly redacted API fixtures in tests.
-- Provide complete local-data deletion and WHOOP access revocation.
+- Provide complete local-data deletion (sign out clears the session, cache, sync time, timer, and recents; Delete local data also clears the no-replay marker) and, when WHOOP supports it, session revocation.
 - Do not add analytics, crash reporting, advertising, or tracking SDKs.
 - Do not use WHOOP logos, screenshots, fonts, or other proprietary visual assets.
 
@@ -79,19 +80,19 @@ WHOOP Developer OAuth refresh tokens rotate. A successful refresh invalidates th
 ## Engineering standards
 
 - Keep changes focused and follow patterns already established in the repository and pinned SDK.
-- Parse OAuth and API payloads with structured parsers. Do not extract fields with ad hoc string manipulation.
+- Parse authentication and API payloads with structured parsers. Do not extract fields with ad hoc string manipulation.
 - Separate pure domain logic from Android and SDK integration so it can be unit tested on the JVM.
 - Add focused tests for token rotation, redaction, provisioning validation, pagination, time zones, partial records, offline caching, and API errors.
 - Treat missing or unscored WHOOP fields as explicit states, not zero values.
 - Use UTC instants for transport and persistence; convert to a display timezone only at the UI boundary.
-- Do not silently broaden OAuth scopes, permissions, network destinations, or background behavior.
+- Do not silently broaden endpoints, permissions, network destinations, or background behavior.
 
 ## Documentation and project state
 
-- Keep `README.md` accurate when product scope, OAuth behavior, permissions, or SDK constraints change.
+- Keep `README.md` accurate when product scope, session behavior, permissions, or SDK constraints change.
 - Treat the `README.md` roadmap as the source of truth for implementation tasks. Update it as work starts, completes, is blocked, or changes scope; do not leave task status to a later cleanup pass.
-- Use coding subagents as workhorses for bounded implementation and verification tasks. Give each subagent a disjoint write scope, review its changes before integration, and keep security-sensitive OAuth decisions under direct review.
+- Use coding subagents as workhorses for bounded implementation and verification tasks. Give each subagent a disjoint write scope, review its changes before integration, and keep security-sensitive session decisions under direct review.
 - Record unresolved limitations under `Open questions` or a future `Known issues` section rather than implying unsupported behavior works.
-- Keep setup instructions explicit about the required official WHOOP app, separate device, developer account, and individual credentials.
+- Keep setup instructions explicit about the required official WHOOP app, separate device and individual WHOOP account sign-in.
 - Do not mark roadmap items complete until the behavior has been implemented and verified.
 - Do not create, edit, or comment on external issues or pull requests without explicit user approval for that action.

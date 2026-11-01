@@ -353,7 +353,7 @@ internal class TextEntryScreen(
 }
 
 internal class AccountViewModel(
-    private val service: WhoopPrivateService,
+    private val signOutAndClear: suspend () -> Unit,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : LightViewModel<Boolean>() {
     data class State(val busy: Boolean = false, val signedOut: Boolean = false, val error: String? = null)
@@ -366,7 +366,7 @@ internal class AccountViewModel(
         _state.value = State(busy = true)
         viewModelScope.launch {
             try {
-                withContext(ioDispatcher) { service.disconnect() }
+                withContext(ioDispatcher) { signOutAndClear() }
                 _state.value = State(signedOut = true)
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -382,8 +382,9 @@ internal class AccountScreen(
 ) : LightScreen<Boolean, AccountViewModel>(sealedActivity) {
     override val viewModelClass: Class<AccountViewModel> = AccountViewModel::class.java
 
-    override fun createViewModel(): AccountViewModel =
-        AccountViewModel(PrivateWhoopServices.getInstance(lightContext))
+    private val repository = DefaultWhoofRepository.getInstance(lightContext)
+
+    override fun createViewModel(): AccountViewModel = AccountViewModel(repository::signOut)
 
     @Composable
     override fun Content() {
@@ -391,7 +392,10 @@ internal class AccountScreen(
         LaunchedEffect(state.signedOut) { if (state.signedOut) goBack(true) }
 
         WhoofPage(title = "WHOOP ACCOUNT", onBack = { goBack() }) {
-            CenteredMessage(if (state.busy) "SIGNING OUT" else "Signed in", state.error)
+            CenteredMessage(
+                if (state.busy) "SIGNING OUT" else "Signed in",
+                state.error ?: if (state.busy) null else "Signing out also removes cached WHOOP data from this phone.",
+            )
             if (!state.busy) {
                 LightBottomBar(listOf(LightBarButton.Text(text = "SIGN OUT", onClick = viewModel::signOut)))
             }

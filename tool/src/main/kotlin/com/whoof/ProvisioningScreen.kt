@@ -18,7 +18,7 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 
 internal class ProvisioningScreen(
     sealedActivity: SealedLightActivity,
-    private val title: String = "CONNECT WHOOP",
+    private val title: String = "SCAN ACCOUNT QR",
 ) : SimpleLightScreen<String>(sealedActivity) {
     @Composable
     override fun Content() {

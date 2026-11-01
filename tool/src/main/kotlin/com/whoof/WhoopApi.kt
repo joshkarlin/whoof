@@ -5,15 +5,11 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
-import io.ktor.client.request.header
+import io.ktor.client.request.headers
 import io.ktor.client.request.parameter
-import io.ktor.client.request.forms.submitForm
+import com.whoof.privateapi.WhoopPrivateHeaders
 import io.ktor.client.statement.HttpResponse
-import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.Parameters
-import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.SerialName
@@ -25,7 +21,6 @@ private const val RECOVERY_URL = "https://api.prod.whoop.com/developer/v2/recove
 private const val CYCLE_URL = "https://api.prod.whoop.com/developer/v2/cycle"
 private const val SLEEP_URL = "https://api.prod.whoop.com/developer/v2/activity/sleep"
 private const val WORKOUT_URL = "https://api.prod.whoop.com/developer/v2/activity/workout"
-private const val TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 private const val DEFAULT_RECENT_LIMIT = 7
 private const val MAX_COLLECTION_LIMIT = 25
 
@@ -193,21 +188,8 @@ internal enum class WhoopApiError {
 
 internal class WhoopApiException(val reason: WhoopApiError) : Exception()
 
-internal class WhoopReprovisioningException(cause: Throwable? = null) :
-    Exception("WHOOP authorization must be provisioned again.", cause)
-
-@Serializable
-internal data class WhoopTokenRefreshResponse(
-    @SerialName("access_token") val accessToken: String,
-    @SerialName("refresh_token") val refreshToken: String,
-    @SerialName("expires_in") val expiresIn: Long,
-)
-
-internal interface WhoopTokenRefresher {
-    suspend fun refresh(credentials: WhoopCredentials): WhoopTokenRefreshResponse
-}
-
-internal interface WhoopHistoryClient : WhoopTokenRefresher {
+/** Developer-v2-shaped reads, authorized with the private account session's bearer token. */
+internal interface WhoopHistoryClient {
     suspend fun recentRecoveries(
         accessToken: String,
         limit: Int = DEFAULT_RECENT_LIMIT,
@@ -273,24 +255,12 @@ internal class WhoopApi : WhoopHistoryClient {
         nextToken: String?,
     ): T {
         val response = client.get(url) {
-            header(HttpHeaders.Authorization, "Bearer $accessToken")
+            headers { WhoopPrivateHeaders.read(accessToken).forEach { (name, value) -> append(name, value) } }
             parameter("limit", boundedRecentLimit(limit))
             nextToken?.let { parameter("nextToken", it) }
         }
         validate(response)
         return response.body()
-    }
-
-    override suspend fun refresh(credentials: WhoopCredentials): WhoopTokenRefreshResponse {
-        val response = client.submitForm(
-            url = TOKEN_URL,
-            formParameters = buildRefreshParameters(credentials),
-        ) {
-            contentType(ContentType.Application.FormUrlEncoded)
-        }
-        validate(response)
-        return runCatching { response.body<WhoopTokenRefreshResponse>() }
-            .getOrElse { throw WhoopApiException(WhoopApiError.Unavailable) }
     }
 
     override fun close() {
@@ -307,21 +277,5 @@ internal class WhoopApi : WhoopHistoryClient {
             else -> WhoopApiError.Unavailable
         }
         throw WhoopApiException(reason)
-    }
-}
-
-internal fun buildRefreshParameters(credentials: WhoopCredentials): Parameters {
-    val clientId = credentials.clientId
-        ?: throw WhoopApiException(WhoopApiError.InvalidRequest)
-    val clientSecret = credentials.clientSecret
-        ?: throw WhoopApiException(WhoopApiError.InvalidRequest)
-    val refreshToken = credentials.refreshToken
-        ?: throw WhoopApiException(WhoopApiError.Unauthorized)
-    return Parameters.build {
-        append("grant_type", "refresh_token")
-        append("refresh_token", refreshToken)
-        append("client_id", clientId)
-        append("client_secret", clientSecret)
-        append("scope", "offline")
     }
 }

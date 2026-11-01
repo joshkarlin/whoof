@@ -36,6 +36,83 @@ class DaySummariesTest {
         assertEquals(listOf("previous"), days[1].activities.map { it.id })
     }
 
+    private val nowMillis = millis("2026-11-01T20:00:00Z")
+
+    private fun pendingActivity(id: String, start: String, created: String = "2026-11-01T19:00:00Z") =
+        PendingActivityEntity(
+            activityId = id,
+            sportId = 1,
+            sportName = "Functional Fitness",
+            startMillis = millis(start),
+            endMillis = millis(start) + 30 * 60_000,
+            timezoneOffset = "+01:00",
+            createdMillis = millis(created),
+        )
+
+    private val twoCycles = CacheSnapshot(
+        cycles = listOf(
+            cycle(1, "2026-10-30T23:00:00Z", "2026-10-31T22:30:00Z"),
+            cycle(2, "2026-10-31T22:30:00Z", null),
+        ),
+        workouts = listOf(workout("listed", "2026-11-01T07:10:00Z")),
+    )
+
+    @Test
+    fun pendingActivitiesJoinTheirCycleByStartTimeInOrderAsPendingRows() {
+        val days = buildDaySummaries(
+            twoCycles,
+            listOf(
+                pendingActivity("early", "2026-11-01T06:00:00Z"),
+                pendingActivity("late", "2026-11-01T18:00:00Z"),
+                pendingActivity("yesterday", "2026-10-31T10:00:00Z"),
+            ),
+            nowMillis,
+        )
+        assertEquals(listOf("early", "listed", "late"), days[0].activities.map { it.id })
+        assertEquals(listOf("yesterday"), days[1].activities.map { it.id })
+        val late = days[0].activities.last()
+        assertEquals(ScoreState.Pending, late.state)
+        assertEquals(true, late.awaitingWhoop)
+        assertEquals(false, days[0].activities[1].awaitingWhoop)
+        assertNull(late.strain)
+        assertEquals("functional-fitness", late.sportName)
+        assertEquals("Functional fitness", late.sportName.displaySportName())
+    }
+
+    @Test
+    fun pendingActivityAlreadyListedAsAWorkoutIsNotDuplicated() {
+        val days = buildDaySummaries(
+            twoCycles,
+            listOf(pendingActivity("LISTED", "2026-11-01T07:10:00Z")),
+            nowMillis,
+        )
+        assertEquals(listOf("listed"), days[0].activities.map { it.id })
+    }
+
+    @Test
+    fun pendingActivitiesExpireAfter48Hours() {
+        val days = buildDaySummaries(
+            twoCycles,
+            listOf(
+                pendingActivity("fresh", "2026-11-01T18:00:00Z", created = "2026-10-30T20:01:00Z"),
+                pendingActivity("stale", "2026-11-01T17:00:00Z", created = "2026-10-30T19:59:00Z"),
+            ),
+            nowMillis,
+        )
+        assertEquals(listOf("listed", "fresh"), days[0].activities.map { it.id })
+    }
+
+    @Test
+    fun stalePendingIdsAreListedWorkoutsAndExpiredOnes() {
+        val rows = listOf(
+            pendingActivity("a", "2026-11-01T18:00:00Z"),
+            pendingActivity("b", "2026-11-01T18:00:00Z"),
+            pendingActivity("c", "2026-11-01T18:00:00Z", created = "2026-10-01T00:00:00Z"),
+        )
+        assertEquals(listOf("a", "c"), stalePendingIds(rows, listOf("A"), nowMillis))
+        assertEquals(listOf("c"), stalePendingIds(rows, emptyList(), nowMillis))
+    }
+
     @Test
     fun usesWakeDateInTheSleepTimezone() {
         // 22:00 to 06:30 at +10:00; the UTC end date is still 31 October.

@@ -105,6 +105,14 @@ internal class WhoopPrivateClient internal constructor(
         return receipt!!
     }
 
+    override suspend fun deleteActivity(session: PrivateWhoopSession, activityId: String) {
+        requirePrivate(canonicalUuid(activityId))
+        execute(
+            PrivateHttpRequest("DELETE", deleteActivityUrl(activityId), accountHeaders(session), null),
+            deleteStatuses = true,
+        )
+    }
+
     override fun close() {
         request.close()
     }
@@ -121,6 +129,7 @@ internal class WhoopPrivateClient internal constructor(
         request: PrivateHttpRequest,
         ambiguousWrite: Boolean = false,
         signInErrors: Boolean = false,
+        deleteStatuses: Boolean = false,
     ): PrivateHttpResponse {
         val response = try {
             this.request.execute(request)
@@ -138,11 +147,20 @@ internal class WhoopPrivateClient internal constructor(
             if (typed != null) throw privateError(typed)
             val reason = when (response.status) {
                 401 -> PrivateWhoopError.Unauthorized
+                403 -> if (deleteStatuses) PrivateWhoopError.Unauthorized else PrivateWhoopError.Rejected
+                404 -> if (deleteStatuses) PrivateWhoopError.NotFound else PrivateWhoopError.Rejected
+                409 -> if (ambiguousWrite) PrivateWhoopError.Overlap else PrivateWhoopError.Rejected
+                422 -> if (ambiguousWrite) PrivateWhoopError.TooShort else PrivateWhoopError.Rejected
                 429 -> PrivateWhoopError.RateLimited
                 in 400..499 -> PrivateWhoopError.Rejected
             else -> if (ambiguousWrite) PrivateWhoopError.SubmissionUncertain else PrivateWhoopError.Unavailable
             }
             throw privateError(reason)
+        }
+        if (deleteStatuses) {
+            // A successful DELETE may have an empty or non-JSON body; nothing in it is read.
+            if (response.status != 200 && response.status != 204) throw privateError(PrivateWhoopError.InvalidResponse)
+            return PrivateHttpResponse(response.status, ByteArray(0))
         }
         if (response.body.size > MAX_RESPONSE_BYTES) {
             throw privateError(if (ambiguousWrite) PrivateWhoopError.SubmissionUncertain else PrivateWhoopError.InvalidResponse)
@@ -219,7 +237,7 @@ internal class WhoopPrivateClient internal constructor(
     }
 
     private fun validateActivity(payload: PrivateActivityPayload, timeZone: String) {
-        requirePrivate(payload.sportId in SUPPORTED_SPORT_IDS && !payload.gpsEnabled)
+        requirePrivate(PrivateWhoopSports.byId(payload.sportId) != null && !payload.gpsEnabled)
         val zone = try {
             ZoneId.of(timeZone)
         } catch (cancelled: CancellationException) {
@@ -263,23 +281,17 @@ internal class WhoopPrivateClient internal constructor(
         "Accept-Language" to "en-US,en;q=0.9",
     )
 
-    private fun accountHeaders(session: PrivateWhoopSession, timeZone: String = DEFAULT_TIME_ZONE) = linkedMapOf(
-        "Authorization" to "Bearer ${session.accessToken}",
-        "Content-Type" to "application/json",
-        "Accept" to "application/json",
-        "User-Agent" to "iOS",
-        "x-whoop-device-platform" to "iOS",
-        "x-whoop-time-zone" to timeZone,
-        "x-whoop-bundle-name" to "com.whoop.iphone",
-        "x-whoop-ios-version" to "5.48.0",
-        "x-whoop-ios-build-number" to "573097",
-    )
+    private fun deleteActivityUrl(activityId: String) = "$DELETE_ACTIVITY_URL$activityId&apiVersion=7"
+
+    private fun accountHeaders(session: PrivateWhoopSession, timeZone: String = DEFAULT_TIME_ZONE) =
+        WhoopPrivateHeaders.account(session.accessToken, timeZone)
 
     private companion object {
         const val AUTH_URL = "https://api.prod.whoop.com/auth-service/v3/whoop/"
         const val ACCOUNT_URL = "https://api.prod.whoop.com/users-service/v2/bootstrap?apiVersion=7"
         const val ACTIVITY_URL = "https://api.prod.whoop.com/core-details-bff/v0/create-activity?apiVersion=7"
-        const val DEFAULT_TIME_ZONE = "Europe/London"
+        const val DELETE_ACTIVITY_URL = "https://api.prod.whoop.com/core-details-bff/v1/cardio-details?activityId="
+        const val DEFAULT_TIME_ZONE = WhoopPrivateHeaders.DEFAULT_TIME_ZONE
         const val MAX_RESPONSE_BYTES = 1_048_576
         const val MAX_ERROR_BYTES = 16_384
         val SIGN_IN_ERRORS = mapOf(
@@ -298,7 +310,6 @@ internal class WhoopPrivateClient internal constructor(
             "SOFTWARE_TOKEN_MFA" to "SOFTWARE_TOKEN_MFA_CODE",
             "EMAIL_OTP" to "EMAIL_OTP_CODE",
         )
-        val SUPPORTED_SPORT_IDS = setOf(0, 1, 45, 52, 63)
         val json = Json {
             encodeDefaults = true
             ignoreUnknownKeys = true

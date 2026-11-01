@@ -2,11 +2,6 @@ package com.whoof
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.stringPreferencesKey
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
@@ -14,74 +9,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import kotlinx.coroutines.flow.first
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 
-internal class TokenStore(
-    private val dataStore: DataStore<Preferences>,
-    private val cipher: CredentialCipher = TokenCipher(),
-) : WhoopCredentialStore {
-    override suspend fun load(): WhoopCredentials? {
-        val encoded = dataStore.data.first()[TOKEN_KEY] ?: return null
-        require(encoded.length <= MAX_BASE64_BLOB_LENGTH) { "Stored credentials are invalid." }
-        val encrypted = runCatching { Base64.decode(encoded, Base64.NO_WRAP) }
-            .getOrElse { throw IllegalArgumentException("Stored credentials are invalid.") }
-        return StoredCredentialsCodec.decode(cipher.decrypt(encrypted))
-    }
-
-    override suspend fun save(credentials: WhoopCredentials) {
-        val serialized = StoredCredentialsCodec.encode(credentials)
-        val encoded = Base64.encodeToString(
-            cipher.encrypt(serialized),
-            Base64.NO_WRAP,
-        )
-        require(encoded.length <= MAX_BASE64_BLOB_LENGTH) { "Stored credentials are too large." }
-        dataStore.edit { it[TOKEN_KEY] = encoded }
-    }
-
-    override suspend fun clear() {
-        dataStore.edit { it.remove(TOKEN_KEY) }
-    }
-
-    private companion object {
-        val TOKEN_KEY = stringPreferencesKey("whoop_credentials_v1")
-    }
-}
-
-internal interface WhoopCredentialStore {
-    suspend fun load(): WhoopCredentials?
-
-    suspend fun save(credentials: WhoopCredentials)
-
-    suspend fun clear()
-}
-
-internal object StoredCredentialsCodec {
-    private val json = Json {
-        encodeDefaults = false
-        ignoreUnknownKeys = false
-    }
-
-    fun encode(credentials: WhoopCredentials): String {
-        CredentialValidation.validate(credentials)
-        return json.encodeToString(credentials).also(::validateSerialized)
-    }
-
-    fun decode(serialized: String): WhoopCredentials {
-        validateSerialized(serialized)
-        return runCatching { json.decodeFromString<WhoopCredentials>(serialized) }
-            .getOrElse { throw IllegalArgumentException("Stored credentials are invalid.") }
-            .also(CredentialValidation::validate)
-    }
-
-    private fun validateSerialized(serialized: String) {
-        require(
-            serialized.toByteArray(StandardCharsets.UTF_8).size <= CredentialValidation.MAX_STORED_JSON_BYTES,
-        ) { "Stored credentials are too large." }
-    }
-}
+internal const val MAX_STORED_PLAINTEXT_BYTES = 8_192
 
 internal interface CredentialCipher {
     fun encrypt(plaintext: String): ByteArray
@@ -112,8 +41,8 @@ internal class TokenCipher : CredentialCipher {
 
     override fun encrypt(plaintext: String): ByteArray {
         val plaintextBytes = plaintext.toByteArray(StandardCharsets.UTF_8)
-        require(plaintextBytes.size <= CredentialValidation.MAX_STORED_JSON_BYTES) {
-            "Stored credentials are too large."
+        require(plaintextBytes.size <= MAX_STORED_PLAINTEXT_BYTES) {
+            "Stored data is too large."
         }
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
@@ -155,9 +84,6 @@ internal class TokenCipher : CredentialCipher {
         const val GCM_IV_MAX_BYTES = 16
         const val MIN_ENCRYPTED_BLOB_LENGTH = 1 + GCM_IV_MIN_BYTES + GCM_TAG_BYTES
         const val MAX_ENCRYPTED_BLOB_LENGTH =
-            1 + GCM_IV_MAX_BYTES + CredentialValidation.MAX_STORED_JSON_BYTES + GCM_TAG_BYTES
+            1 + GCM_IV_MAX_BYTES + MAX_STORED_PLAINTEXT_BYTES + GCM_TAG_BYTES
     }
 }
-
-private const val MAX_BASE64_BLOB_LENGTH =
-    ((1 + 16 + CredentialValidation.MAX_STORED_JSON_BYTES + 16 + 2) / 3) * 4

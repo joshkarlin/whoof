@@ -6,6 +6,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -18,7 +19,8 @@ class PrivateWhoopPersistenceTest {
             session = testSession(),
             draft = PrivateActivityDraft(
                 id = UUID.randomUUID().toString(),
-                sport = PrivateWhoopSport.Cycling,
+                sportId = 1,
+                sportName = "Cycling",
                 startEpochMillis = Instant.parse("2024-10-27T00:30:00.125Z").toEpochMilli(),
                 endEpochMillis = Instant.parse("2024-10-27T01:30:00.875Z").toEpochMilli(),
                 timeZone = "Europe/London",
@@ -31,6 +33,50 @@ class PrivateWhoopPersistenceTest {
 
         assertTrue(encoded.contains("\"version\":1"))
         assertEquals(state, PrivateWhoopStateCodec.decode(encoded))
+    }
+
+    @Test
+    fun codecKeepsLegacyEnumDraftsIncludingNoReplayMarkers() {
+        val id = UUID.randomUUID().toString()
+        val legacy = { sport: String, status: String, activity: String ->
+            """{"version":1,"session":null,"draft":{"id":"$id","sport":"$sport","startEpochMillis":1000,"endEpochMillis":61000,""" +
+                """"timeZone":"UTC","status":"$status","activityId":$activity}}"""
+        }
+        val expected = mapOf("Running" to 0, "Cycling" to 1, "Weightlifting" to 45, "Hiking" to 52, "Walking" to 63)
+        expected.forEach { (name, sportId) ->
+            val draft = PrivateWhoopStateCodec.decode(legacy(name, "Uncertain", "null")).draft!!
+            assertEquals(sportId, draft.sportId)
+            assertEquals(name, draft.sportName)
+            assertEquals(PrivateActivityStatus.Uncertain, draft.status)
+        }
+        val receipt = UUID.randomUUID().toString()
+        val submitted = PrivateWhoopStateCodec.decode(legacy("Running", "Submitted", "\"$receipt\"")).draft!!
+        assertEquals(receipt, submitted.activityId)
+        assertFailsWith<PrivateWhoopException> { PrivateWhoopStateCodec.decode(legacy("Surfing", "Prepared", "null")) }
+        // Re-encoding writes the new format.
+        val reencoded = PrivateWhoopStateCodec.encode(PrivateWhoopStateCodec.decode(legacy("Hiking", "Rejected", "null")))
+        assertTrue(reencoded.contains("\"sportId\":52") && !reencoded.contains("\"sport\":"))
+    }
+
+    @Test
+    fun draftRejectsSportIdOutsideCatalogOrWithMismatchedName() {
+        val base = PrivateActivityDraft(UUID.randomUUID().toString(), 0, "Running", 1_000, 61_000, "UTC")
+        base.validate(Instant.EPOCH, completedOnly = false)
+        listOf(base.copy(sportId = 9_999, sportName = "Running"), base.copy(sportName = "Cycling")).forEach {
+            assertFailsWith<PrivateWhoopException> { it.validate(Instant.EPOCH, completedOnly = false) }
+        }
+    }
+
+    @Test
+    fun sportCatalogHasUniqueIdsAndLookups() {
+        assertEquals(203, PrivateWhoopSports.all.size)
+        assertEquals(203, PrivateWhoopSports.all.map { it.id }.toSet().size)
+        assertEquals("Activity", PrivateWhoopSports.byId(-1)?.name)
+        assertEquals("Other", PrivateWhoopSports.byId(71)?.name)
+        assertEquals("Running", PrivateWhoopSports.byId(0)?.name)
+        assertNull(PrivateWhoopSports.byId(9_999))
+        val names = PrivateWhoopSports.all.map { it.name.lowercase() }
+        assertEquals(names.sorted(), names)
     }
 
     @Test
@@ -72,7 +118,8 @@ class PrivateWhoopPersistenceTest {
     fun encoderRejectsInvalidDraftInsteadOfPersistingIt() {
         val invalidDraft = PrivateActivityDraft(
             id = "not-a-uuid",
-            sport = PrivateWhoopSport.Running,
+            sportId = 0,
+            sportName = "Running",
             startEpochMillis = 1_000,
             endEpochMillis = 61_000,
             timeZone = "UTC",

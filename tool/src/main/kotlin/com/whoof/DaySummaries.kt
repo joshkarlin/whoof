@@ -76,6 +76,8 @@ internal data class ActivitySummary(
     val averageHeartRate: Int?,
     /** Zone 0 through 5 as fractions of recorded zone time, or empty when WHOOP reports none. */
     val zoneFractions: List<Float>,
+    /** True for an activity logged on this phone that WHOOP's workout list has not returned yet. */
+    val awaitingWhoop: Boolean = false,
 )
 
 internal data class DaySummary(
@@ -91,7 +93,12 @@ internal data class DaySummary(
 )
 
 /** Groups cached records into WHOOP cycles, newest first. */
-internal fun buildDaySummaries(snapshot: CacheSnapshot): List<DaySummary> {
+internal fun buildDaySummaries(
+    snapshot: CacheSnapshot,
+    pending: List<PendingActivityEntity> = emptyList(),
+    nowMillis: Long = System.currentTimeMillis(),
+): List<DaySummary> {
+    val local = livePending(pending, snapshot.workouts.map { it.id }, nowMillis)
     val recoveries = snapshot.recoveries.associateBy { it.cycleId }
     val sleeps = snapshot.sleeps
         .filter { !it.nap }
@@ -109,14 +116,17 @@ internal fun buildDaySummaries(snapshot: CacheSnapshot): List<DaySummary> {
                 strain = cycle.strain,
                 recovery = recovery?.toSummary(),
                 sleep = sleep?.toSummary(),
-                activities = snapshot.workouts
-                    .filter { it.startMillis >= cycle.startMillis && (cycle.endMillis == null || it.startMillis < cycle.endMillis) }
-                    .sortedBy { it.startMillis }
-                    .map { it.toSummary() },
+                activities = (
+                    snapshot.workouts.filter { cycle.contains(it.startMillis) }.map { it.startMillis to it.toSummary() } +
+                        local.filter { cycle.contains(it.startMillis) }.map { it.startMillis to it.toSummary() }
+                    ).sortedBy { it.first }.map { it.second },
                 updatedMillis = listOfNotNull(cycle.updatedMillis, recovery?.updatedMillis, sleep?.updatedMillis).max(),
             )
         }
 }
+
+private fun CycleEntity.contains(startMillis: Long): Boolean =
+    startMillis >= this.startMillis && (endMillis == null || startMillis < endMillis)
 
 /**
  * A WHOOP cycle begins at sleep onset, so its calendar day is the wake date. Without a sleep, the

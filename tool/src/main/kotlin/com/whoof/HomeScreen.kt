@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -35,17 +36,22 @@ import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
+import com.thelightphone.sdk.ui.LightIcon
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.thelightphone.sdk.ui.lightClickable
+import com.whoof.privateapi.PrivateWhoopError
+import com.whoof.privateapi.PrivateWhoopException
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -83,6 +89,7 @@ internal data class HomeUiState(
     val sync: SyncStatus = SyncStatus.Idle,
     val lastSyncMillis: Long? = null,
     val message: String? = null,
+    val activity: ActivityStatus = ActivityStatus(),
 )
 
 /**
@@ -92,6 +99,7 @@ internal data class HomeUiState(
 internal class HomeViewModel(
     private val repository: WhoofRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val activityStatus: suspend () -> ActivityStatus = { ActivityStatus() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) : LightViewModel<Unit>() {
     private val _state = MutableStateFlow(HomeUiState())
@@ -103,7 +111,22 @@ internal class HomeViewModel(
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
-        if (initialized) syncIfStale() else start()
+        if (initialized) recheckSignIn() else start()
+        refreshActivity()
+    }
+
+    /** Re-reads whether a private session and a running timer exist; cheap, so done on every show. */
+    internal fun refreshActivity() {
+        viewModelScope.launch {
+            val status = try {
+                withContext(ioDispatcher) { activityStatus() }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                ActivityStatus()
+            }
+            _state.update { it.copy(activity = status) }
+        }
     }
 
     internal fun start() {
@@ -116,38 +139,54 @@ internal class HomeViewModel(
                 }
         }
         viewModelScope.launch {
-            val connected = try {
-                withContext(ioDispatcher) { repository.hasCredentials() }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                _state.update { it.copy(connection = Connection.NotConnected, message = "Stored credentials could not be read.") }
-                return@launch
+            val signedIn = readSignedIn() ?: return@launch
+            if (signedIn) {
+                _state.update { it.copy(connection = Connection.Connected) }
+                sync()
+            } else {
+                _state.update { it.copy(connection = Connection.NotConnected) }
             }
-            _state.update { it.copy(connection = if (connected) Connection.Connected else Connection.NotConnected) }
-            if (connected) sync()
         }
     }
 
-    fun provision(payload: String) {
-        val credentials = runCatching { ProvisioningPayload.parse(payload) }.getOrElse {
-            _state.update { state -> state.copy(message = it.message ?: "Invalid provisioning QR code.") }
-            return
+    /** Reads whether a session exists; on a read failure, reports it and returns null. */
+    private suspend fun readSignedIn(): Boolean? = try {
+        withContext(ioDispatcher) { repository.isSignedIn() }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Exception) {
+        _state.update {
+            if (it.connection == Connection.Connected) it
+            else it.copy(connection = Connection.NotConnected, message = "The stored sign-in could not be read.")
         }
+        null
+    }
+
+    /**
+     * Called each time Today is shown: picks up a sign-in or sign-out done on another screen, then
+     * applies the normal sync interval.
+     */
+    internal fun recheckSignIn() {
         viewModelScope.launch {
-            stopSync()
-            try {
-                withContext(ioDispatcher) { repository.provision(credentials) }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                _state.update { it.copy(message = "Unable to store the access token securely.") }
-                return@launch
+            val signedIn = readSignedIn() ?: return@launch
+            val connected = _state.value.connection == Connection.Connected
+            when {
+                signedIn && !connected -> onSignedIn()
+                signedIn -> syncIfStale()
+                connected -> {
+                    stopSync()
+                    resetBackoff()
+                    _state.update { it.copy(connection = Connection.NotConnected, sync = SyncStatus.Idle, message = null) }
+                }
             }
-            resetBackoff()
-            _state.update { it.copy(connection = Connection.Connected, sync = SyncStatus.Idle, message = null) }
-            sync()
         }
+    }
+
+    /** After a successful sign-in: clears any expired-session state and syncs immediately. */
+    fun onSignedIn() {
+        resetBackoff()
+        _state.update { it.copy(connection = Connection.Connected, sync = SyncStatus.Idle, message = null) }
+        sync()
     }
 
     /** Starts a sync unless one is already running. Explicit requests ignore failure backoff. */
@@ -161,8 +200,14 @@ internal class HomeViewModel(
                 SyncStatus.Idle
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (_: WhoopReprovisioningException) {
-                SyncStatus.AuthorizationExpired
+            } catch (error: PrivateWhoopException) {
+                when (error.reason) {
+                    PrivateWhoopError.ReconnectRequired, PrivateWhoopError.Unauthorized -> SyncStatus.AuthorizationExpired
+                    PrivateWhoopError.RateLimited ->
+                        SyncStatus.Failed(WhoopApiError.RateLimited.userMessage(), rateLimited = true)
+                    PrivateWhoopError.Unavailable -> SyncStatus.Offline
+                    else -> SyncStatus.Failed("Unable to refresh the WHOOP session.")
+                }
             } catch (error: WhoopApiException) {
                 when (error.reason) {
                     WhoopApiError.Unauthorized -> SyncStatus.AuthorizationExpired
@@ -186,11 +231,12 @@ internal class HomeViewModel(
         if (lastSync == null || nowMillis() - lastSync >= AUTO_SYNC_INTERVAL_MILLIS) sync()
     }
 
-    fun disconnect() {
+    /** Settings > Delete local data: signs out and removes everything this phone stores. */
+    fun deleteLocalData() {
         viewModelScope.launch {
             stopSync()
             try {
-                withContext(ioDispatcher) { repository.disconnect() }
+                withContext(ioDispatcher) { repository.deleteLocalData() }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
@@ -236,8 +282,8 @@ internal fun failureBackoffMillis(consecutiveFailures: Int): Long {
 }
 
 internal fun WhoopApiError.userMessage(): String = when (this) {
-    WhoopApiError.Unauthorized -> "Access token expired. Scan a new token."
-    WhoopApiError.MissingScope -> "Authorization is missing a required WHOOP scope."
+    WhoopApiError.Unauthorized -> "Session expired. Sign in again."
+    WhoopApiError.MissingScope -> "WHOOP denied access to this data."
     WhoopApiError.RateLimited -> "WHOOP rate limit reached. Try again later."
     WhoopApiError.InvalidRequest -> "WHOOP rejected the request."
     WhoopApiError.Unavailable -> "WHOOP returned an unexpected response."
@@ -260,24 +306,45 @@ internal class HomeScreen(
 
     override val viewModelClass: Class<HomeViewModel> = HomeViewModel::class.java
 
-    override fun createViewModel(): HomeViewModel = HomeViewModel(repository)
+    private val activityTools = ActivityTools.from(lightContext)
 
-    private fun scanToken() {
-        navigateTo(::ProvisioningScreen) { viewModel.provision(it) }
+    override fun createViewModel(): HomeViewModel = HomeViewModel(repository, activityStatus = activityTools::status)
+
+    private fun signIn() {
+        navigateTo(::SignInScreen) { signedIn -> if (signedIn) viewModel.onSignedIn() }
     }
 
     private fun openSettings() {
         navigateTo(::SettingsScreen) { action ->
             when (action) {
                 SettingsAction.SyncNow -> viewModel.sync()
-                SettingsAction.ReplaceToken -> scanToken()
-                SettingsAction.Disconnect -> viewModel.disconnect()
+                SettingsAction.SignedOut -> viewModel.recheckSignIn()
+                SettingsAction.DeleteData -> viewModel.deleteLocalData()
             }
         }
     }
 
     private fun openHistory(metric: HistoryMetric) {
-        navigateTo({ MetricHistoryScreen(it, metric, repository) })
+        navigateTo({ MetricHistoryScreen(it, metric, repository) }) { changed ->
+            if (changed) viewModel.sync()
+        }
+    }
+
+    private fun logActivity() {
+        navigateTo({ SportPickerScreen(it) }) { sportId -> openTimer(sportId) }
+    }
+
+    private fun openTimer(sportId: Int?) {
+        navigateTo({ TimerScreen(it, sportId) }) { logged ->
+            viewModel.refreshActivity()
+            if (logged) viewModel.sync()
+        }
+    }
+
+    private fun openActivity(activity: ActivitySummary) {
+        navigateTo({ ActivityScreen(it, activity, repository) }) { deleted ->
+            if (deleted) viewModel.sync()
+        }
     }
 
     @Composable
@@ -296,9 +363,9 @@ internal class HomeScreen(
         ) {
             when {
                 state.connection == Connection.Starting -> Unit
-                state.connection == Connection.NotConnected -> NotConnected(state.message, ::scanToken)
+                state.connection == Connection.NotConnected -> NotConnected(state.message, ::signIn)
                 days == null -> Unit
-                today == null -> EmptyToday(state.sync, ::scanToken, viewModel::sync)
+                today == null -> EmptyToday(state.sync, ::signIn, viewModel::sync)
                 else -> TodayContent(
                     today = today,
                     earlier = days.drop(1),
@@ -306,22 +373,43 @@ internal class HomeScreen(
                     syncDetails = state.syncDetailsText(today),
                     syncProblem = state.sync.problemText(),
                     onSync = viewModel::sync,
-                    onReconnect = if (state.sync is SyncStatus.AuthorizationExpired) ::scanToken else null,
+                    onReconnect = if (state.sync is SyncStatus.AuthorizationExpired) ::signIn else null,
                     onHistory = ::openHistory,
+                    activity = state.activity,
+                    onLog = ::logActivity,
+                    onTimer = { openTimer(null) },
+                    onActivityClick = if (state.activity.signedIn) ::openActivity else null,
                 )
             }
         }
     }
 }
 
+/** Reopens the running timer from Today; ticks once a second while visible. */
 @Composable
-private fun ColumnScope.NotConnected(message: String?, onConnect: () -> Unit) {
-    CenteredMessage("CONNECT WHOOP", message ?: "Scan a provisioning QR code made on your computer.")
-    LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = onConnect)))
+private fun RunningTimer(timer: ActivityTimer, onClick: () -> Unit) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(timer.startMillis) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    LightText(
+        text = formatElapsed(now - timer.startMillis),
+        variant = LightTextVariant.Copy,
+        modifier = Modifier.lightClickable(onClickLabel = "Open timer", onClick = onClick),
+    )
 }
 
 @Composable
-private fun ColumnScope.EmptyToday(sync: SyncStatus, onScan: () -> Unit, onRetry: () -> Unit) {
+private fun ColumnScope.NotConnected(message: String?, onSignIn: () -> Unit) {
+    CenteredMessage("Sign in to WHOOP", message ?: "Whoof shows the data your WHOOP account already has.")
+    LightBottomBar(listOf(LightBarButton.Text(text = "SIGN IN", onClick = onSignIn)))
+}
+
+@Composable
+private fun ColumnScope.EmptyToday(sync: SyncStatus, onSignIn: () -> Unit, onRetry: () -> Unit) {
     when (sync) {
         SyncStatus.Syncing -> CenteredMessage("LOADING")
         SyncStatus.Idle -> CenteredMessage("NO DATA", "WHOOP has no recent cycles for this account.")
@@ -330,8 +418,8 @@ private fun ColumnScope.EmptyToday(sync: SyncStatus, onScan: () -> Unit, onRetry
             LightBottomBar(listOf(LightBarButton.Text(text = "RETRY", onClick = onRetry)))
         }
         SyncStatus.AuthorizationExpired -> {
-            CenteredMessage("RECONNECT WHOOP", "Authorization expired. Scan a new provisioning QR code.")
-            LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = onScan)))
+            CenteredMessage("SESSION EXPIRED", "Sign in to WHOOP again.")
+            LightBottomBar(listOf(LightBarButton.Text(text = "SIGN IN", onClick = onSignIn)))
         }
         is SyncStatus.Failed -> {
             CenteredMessage("SYNC FAILED", sync.message)
@@ -350,7 +438,7 @@ private fun HomeUiState.syncDetailsText(today: DaySummary): String = listOfNotNu
 private fun SyncStatus.problemText(): String? = when (this) {
     SyncStatus.Syncing, SyncStatus.Idle -> null
     SyncStatus.Offline -> "OFFLINE"
-    SyncStatus.AuthorizationExpired -> "AUTHORIZATION EXPIRED"
+    SyncStatus.AuthorizationExpired -> "SESSION EXPIRED"
     is SyncStatus.Failed -> if (rateLimited) "RATE LIMITED" else "SYNC FAILED"
 }
 
@@ -364,21 +452,40 @@ private fun ColumnScope.TodayContent(
     onSync: () -> Unit,
     onReconnect: (() -> Unit)?,
     onHistory: (HistoryMetric) -> Unit,
+    activity: ActivityStatus,
+    onLog: () -> Unit,
+    onTimer: () -> Unit,
+    onActivityClick: ((ActivitySummary) -> Unit)?,
 ) {
     PullToSync(syncing = syncing, details = syncDetails, onSync = onSync) {
         // Dials and vitals stay fixed; only the activity rows scroll.
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 1f.gridUnitsAsDp())) {
             Dials(today, onHistory)
             Vitals(today, earlier, Modifier.padding(top = 1.2f.gridUnitsAsDp()))
-            SectionLabel("ACTIVITY", Modifier.padding(top = 1.4f.gridUnitsAsDp()))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 1.4f.gridUnitsAsDp()),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("ACTIVITY", Modifier.weight(1f))
+                val timer = activity.timer
+                when {
+                    timer != null -> RunningTimer(timer, onTimer)
+                    activity.signedIn -> LightIcon(
+                        icon = LightIcons.ADD,
+                        size = 1.5f,
+                        contentDescription = "Log activity",
+                        modifier = Modifier.lightClickable(onClick = onLog).padding(horizontal = 0.4f.gridUnitsAsDp()),
+                    )
+                }
+            }
         }
         LightScrollView(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 1f.gridUnitsAsDp()),
+                .padding(start = 1f.gridUnitsAsDp()),
         ) {
-            ActivityRows(today.activities, Modifier.padding(bottom = 1f.gridUnitsAsDp()))
+            ActivityRows(today.activities, Modifier.padding(bottom = 1f.gridUnitsAsDp()), onActivityClick)
         }
     }
     syncProblem?.let {
@@ -393,7 +500,7 @@ private fun ColumnScope.TodayContent(
         )
     }
     onReconnect?.let {
-        LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = it)))
+        LightBottomBar(listOf(LightBarButton.Text(text = "SIGN IN", onClick = it)))
     }
 }
 
@@ -579,15 +686,23 @@ private fun Vital(
 }
 
 @Composable
-internal fun Activities(activities: List<ActivitySummary>, modifier: Modifier = Modifier) {
+internal fun Activities(
+    activities: List<ActivitySummary>,
+    modifier: Modifier = Modifier,
+    onActivityClick: ((ActivitySummary) -> Unit)? = null,
+) {
     Column(modifier = modifier.fillMaxWidth()) {
         SectionLabel("ACTIVITY")
-        ActivityRows(activities)
+        ActivityRows(activities, onActivityClick = onActivityClick)
     }
 }
 
 @Composable
-private fun ActivityRows(activities: List<ActivitySummary>, modifier: Modifier = Modifier) {
+private fun ActivityRows(
+    activities: List<ActivitySummary>,
+    modifier: Modifier = Modifier,
+    onActivityClick: ((ActivitySummary) -> Unit)? = null,
+) {
     Column(modifier = modifier.fillMaxWidth()) {
         if (activities.isEmpty()) {
             LightText(
@@ -598,7 +713,7 @@ private fun ActivityRows(activities: List<ActivitySummary>, modifier: Modifier =
             )
         }
         activities.forEach {
-            ActivityRow(it, Modifier.padding(top = 0.6f.gridUnitsAsDp()))
+            ActivityRow(it, Modifier.padding(top = 0.6f.gridUnitsAsDp()), onActivityClick?.let { open -> { open(it) } })
         }
     }
 }

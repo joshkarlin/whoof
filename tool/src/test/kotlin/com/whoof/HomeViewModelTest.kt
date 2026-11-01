@@ -1,5 +1,7 @@
 package com.whoof
 
+import com.whoof.privateapi.PrivateWhoopError
+import com.whoof.privateapi.PrivateWhoopException
 import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -22,7 +24,7 @@ import java.time.LocalDate
 @OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModelTest {
     @Test
-    fun reportsNotConnectedWithoutCredentials() = homeTest(FakeRepository(connected = false)) { viewModel, _ ->
+    fun reportsNotConnectedWhenSignedOut() = homeTest(FakeRepository(connected = false)) { viewModel, _ ->
         viewModel.start()
         advanceUntilIdle()
 
@@ -71,8 +73,8 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun reportsAuthorizationExpiredWhenReprovisioningIsRequired() {
-        val repository = FakeRepository(syncFailure = WhoopReprovisioningException())
+    fun reportsAuthorizationExpiredWhenReconnectIsRequired() {
+        val repository = FakeRepository(syncFailure = PrivateWhoopException(PrivateWhoopError.ReconnectRequired))
         homeTest(repository) { viewModel, _ ->
             viewModel.start()
             advanceUntilIdle()
@@ -96,15 +98,70 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun disconnectDeletesLocalDataAndReturnsToProvisioning() =
+    fun signedOutTodayDoesNotSyncAndOffersSignIn() = homeTest(FakeRepository(connected = false)) { viewModel, repository ->
+        viewModel.start()
+        advanceUntilIdle()
+        viewModel.sync()
+        viewModel.syncIfStale()
+        advanceUntilIdle()
+
+        assertEquals(Connection.NotConnected, viewModel.state.value.connection)
+        assertEquals(0, repository.syncCount)
+    }
+
+    @Test
+    fun signingInAfterReturningSyncsAndClearsExpiredState() {
+        val repository = FakeRepository(syncFailure = PrivateWhoopException(PrivateWhoopError.ReconnectRequired))
+        homeTest(repository) { viewModel, _ ->
+            viewModel.start()
+            advanceUntilIdle()
+            assertEquals(SyncStatus.AuthorizationExpired, viewModel.state.value.sync)
+
+            repository.syncFailure = null
+            viewModel.onSignedIn()
+            advanceUntilIdle()
+
+            assertEquals(2, repository.syncCount)
+            assertEquals(SyncStatus.Idle, viewModel.state.value.sync)
+        }
+    }
+
+    @Test
+    fun recheckPicksUpASignInDoneElsewhere() = homeTest(FakeRepository(connected = false)) { viewModel, repository ->
+        viewModel.start()
+        advanceUntilIdle()
+
+        repository.connected = true
+        viewModel.recheckSignIn()
+        advanceUntilIdle()
+
+        assertEquals(Connection.Connected, viewModel.state.value.connection)
+        assertEquals(1, repository.syncCount)
+    }
+
+    @Test
+    fun recheckShowsSignedOutAfterSigningOutElsewhere() = homeTest(FakeRepository()) { viewModel, repository ->
+        viewModel.start()
+        advanceUntilIdle()
+
+        repository.signOut()
+        viewModel.recheckSignIn()
+        advanceUntilIdle()
+
+        assertEquals(Connection.NotConnected, viewModel.state.value.connection)
+        assertEquals(emptyList(), viewModel.state.value.days)
+    }
+
+    @Test
+    fun deleteLocalDataReturnsToSignedOutState() =
         homeTest(FakeRepository(days = listOf(day(1)))) { viewModel, repository ->
             viewModel.start()
             advanceUntilIdle()
 
-            viewModel.disconnect()
+            viewModel.deleteLocalData()
             advanceUntilIdle()
 
-            assertTrue(repository.disconnected)
+            assertTrue(repository.deleted)
             assertEquals(Connection.NotConnected, viewModel.state.value.connection)
             assertEquals(emptyList(), viewModel.state.value.days)
             assertNull(viewModel.state.value.lastSyncMillis)
@@ -127,17 +184,17 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun disconnectStopsAnInFlightSyncBeforeDeleting() {
+    fun deleteStopsAnInFlightSyncBeforeDeleting() {
         val repository = FakeRepository(beforeSync = { CompletableDeferred<Unit>().await() })
         homeTest(repository) { viewModel, _ ->
             viewModel.start()
             runCurrent()
             assertEquals(SyncStatus.Syncing, viewModel.state.value.sync)
 
-            viewModel.disconnect()
+            viewModel.deleteLocalData()
             advanceUntilIdle()
 
-            assertTrue(repository.disconnected)
+            assertTrue(repository.deleted)
             assertEquals(SyncStatus.Idle, viewModel.state.value.sync)
             assertEquals(Connection.NotConnected, viewModel.state.value.connection)
         }
@@ -216,25 +273,21 @@ class HomeViewModelTest {
 }
 
 private class FakeRepository(
-    private var connected: Boolean = true,
+    var connected: Boolean = true,
     days: List<DaySummary> = emptyList(),
-    private val syncFailure: Exception? = null,
+    var syncFailure: Exception? = null,
     private val beforeSync: (suspend () -> Unit)? = null,
 ) : WhoofRepository {
     val syncedAt = NOW_MILLIS
     private val daysFlow = MutableStateFlow(days)
     private val lastSyncFlow = MutableStateFlow<Long?>(null)
     var syncCount = 0
-    var disconnected = false
+    var deleted = false
 
     override val days: Flow<List<DaySummary>> = daysFlow
     override val lastSuccessfulSyncMillis: Flow<Long?> = lastSyncFlow
 
-    override suspend fun hasCredentials(): Boolean = connected
-
-    override suspend fun provision(credentials: WhoopCredentials) {
-        connected = true
-    }
+    override suspend fun isSignedIn(): Boolean = connected
 
     override suspend fun sync() {
         syncCount++
@@ -243,8 +296,22 @@ private class FakeRepository(
         lastSyncFlow.value = syncedAt
     }
 
-    override suspend fun disconnect() {
-        disconnected = true
+    val removed = mutableListOf<String>()
+
+    override suspend fun addPendingActivity(activity: PendingActivityEntity) = Unit
+
+    override suspend fun removeCachedWorkout(id: String) {
+        removed += id
+    }
+
+    override suspend fun signOut() {
+        connected = false
+        daysFlow.value = emptyList()
+        lastSyncFlow.value = null
+    }
+
+    override suspend fun deleteLocalData() {
+        deleted = true
         connected = false
         daysFlow.value = emptyList()
         lastSyncFlow.value = null

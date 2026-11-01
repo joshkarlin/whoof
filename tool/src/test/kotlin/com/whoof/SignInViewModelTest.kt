@@ -162,6 +162,7 @@ class SignInViewModelTest {
         override suspend fun checkAccount(session: PrivateWhoopSession) { checks++; check() }
         override suspend fun createActivity(session: PrivateWhoopSession, payload: PrivateActivityPayload, timeZone: String) =
             throw IllegalStateException()
+        override suspend fun deleteActivity(session: PrivateWhoopSession, activityId: String) = throw IllegalStateException()
     }
 
     private companion object {
