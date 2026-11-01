@@ -72,6 +72,26 @@ class LightToolMetadataTest {
     }
 
     @Test
+    fun `icon is optional and validated`(@TempDir dir: Path) {
+        fun toml(icon: String?) = writeToml(dir, """
+            [tool]
+            id = "com.example.mytool"
+            label = "My Tool"
+            versionCode = 1
+            versionName = "1.0.0"
+            serverPackage = "com.lightos"
+        """.trimIndent() + (icon?.let { "\nicon = \"$it\"" } ?: ""))
+
+        assertEquals(null, LightToolMetadata.parse(toml(null)).icon)
+        assertEquals("@mipmap/ic_launcher", LightToolMetadata.parse(toml("@mipmap/ic_launcher")).icon)
+        assertEquals("@drawable/icon_1", LightToolMetadata.parse(toml("@drawable/icon_1")).icon)
+        for (bad in listOf("ic_launcher", "@string/x", "@mipmap/Ic", "@mipmap/")) {
+            val ex = assertThrows<LightToolMetadataException> { LightToolMetadata.parse(toml(bad)) }
+            assert(ex.message!!.contains("tool.icon"))
+        }
+    }
+
+    @Test
     fun `capabilities default to empty`(@TempDir dir: Path) {
         val file = writeToml(dir, """
             [tool]

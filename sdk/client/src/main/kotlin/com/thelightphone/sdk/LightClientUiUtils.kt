@@ -41,9 +41,11 @@ import kotlin.time.Duration.Companion.milliseconds
  * the client library's functions for checking and requesting the camera
  * permission for the SDK server.
  *
- * Local Whoof SDK change: debug builds ask Android for the camera permission
- * directly, because production LightOS rejects sideloaded tools at the SDK
- * service ("caller not verified"). Release builds still use the broker.
+ * Local Whoof SDK change: when the `lightSdk.directCameraPermission` Gradle
+ * property is true (`BuildConfig.DIRECT_CAMERA_PERMISSION`, any build type),
+ * this asks Android for the camera permission directly, because production
+ * LightOS rejects sideloaded tools at the SDK service ("caller not verified").
+ * It defaults to false, which uses the LightOS broker like upstream.
  *
  * Defaults to QR-only. Pass [LightBarcodeFormats] constants in [formats] to
  * decode other symbologies, and [onScannedBarcode] to receive the full result
@@ -61,7 +63,7 @@ fun LightQrCodeScanner(
 ) {
     val checkCameraPermission: suspend () -> Result<Boolean>
     val launchCameraPermissionRequest: () -> Unit
-    if (BuildConfig.DEBUG) {
+    if (BuildConfig.DIRECT_CAMERA_PERMISSION) {
         val activity = LocalActivity.current
         val directLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.RequestPermission(),

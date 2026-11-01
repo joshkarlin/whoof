@@ -74,15 +74,15 @@ adb install -r --no-incremental whoof-0.2.0.apk
 LP3: an incremental install streams the APK after reporting success, and if the stream breaks,
 Android deletes the half-installed app and its data. Builds are signed with the public
 Light SDK development key (see [Local SDK signing](#local-sdk-signing)), so a release installs over
-a local debug build and the other way round.
+a local debug build and the other way round. Releases are minified, non-debuggable builds.
 
 ### Releasing
 
 Push a tag such as `v0.2.0`, or `v0.2.0-rc.1` for a prerelease. The release workflow derives
 `versionCode` from the tag, writes it and the base `major.minor.patch` version into
 `tool/lighttool.toml` (the SDK rejects prerelease suffixes there), runs the tool's tests, and
-attaches the debug APK to a GitHub Release (see [Local SDK signing](#local-sdk-signing) for why
-it is the debug build). CI runs the same tests on every push to `main`.
+attaches the minified, non-debuggable release APK to a GitHub Release. CI runs the debug tests on
+every push to `main`.
 
 ### Sign in on the phone
 
@@ -111,11 +111,19 @@ This repository inherits `sdk/keys/lightsdk-dev.jks` and its history directly fr
 development and the LightOS emulator. Whoof's debug and release builds are both signed with it.
 On the LP3 tested (November 2026), LightOS's SDK service rejects Whoof with "caller not
 verified" whether it is signed with this key or a private one, and in debug and release builds, so
-brokered SDK features are unavailable. The QR scanner still works in debug builds because Whoof's
-SDK copy asks Android for the camera permission directly when `BuildConfig.DEBUG` is set
-(`sdk/client/.../LightClientUiUtils.kt`, a local SDK change). Releases therefore ship the debug
-build; see Known issues. Do not
-replace the key or place private signing material in this repository.
+brokered SDK features are unavailable. The QR scanner still works in every build type, release
+included, because Whoof's SDK copy asks Android for the camera permission directly when the
+`lightSdk.directCameraPermission` Gradle property is true (set in `gradle.properties`; it defaults
+to false, like upstream). Do not replace the key or place private signing material in this
+repository.
+
+Whoof carries two local changes to the Light SDK, neither of which is upstream behavior:
+- Camera flag: `lightSdk.directCameraPermission` makes `LightQrCodeScanner`
+  (`sdk/client/.../LightClientUiUtils.kt`) request `CAMERA` from Android directly instead of
+  through the LightOS broker, exposed as `BuildConfig.DIRECT_CAMERA_PERMISSION`.
+- Icon field: an optional `icon` in `tool/lighttool.toml` (`plugin/.../LightToolMetadata.kt`,
+  `ManifestGenerator.kt`, documented in `docs/tool_metadata/README.md`) emits `android:icon` and
+  `android:roundIcon` on the generated manifest.
 
 The repository is expected to contain two independently buildable parts:
 
@@ -235,8 +243,8 @@ Whoof now has a single sign-in, the WHOOP account session described above. See [
 ## Known issues
 
 - Whoof is signed with the public Light SDK development key. A private key would not lose any LightOS access, since LightOS rejects Whoof either way, but switching keys needs one uninstall. Anyone with that key can sign an APK that installs over Whoof and reads its stored session, so install Whoof only from this repository's releases or your own build.
-- Releases are debuggable builds, because the QR scanner's camera permission only works through the debug-only direct permission path. A debuggable app's data can be read over USB with `adb run-as` by anyone who can unlock the phone and has USB debugging enabled.
-- LightOS's SDK service does not verify Whoof, so any brokered SDK feature (beyond the debug-only camera path) is unavailable unless Light signs the tool.
+- LightOS's SDK service does not verify Whoof, so any brokered SDK feature (beyond the camera, which uses the local `lightSdk.directCameraPermission` change) is unavailable unless Light signs the tool.
+- Release builds are minified with R8 and have only been checked for building and unit tests; verify sign-in, sync and the QR scanner on the LP3 after installing one.
 
 - History covers the last 14 days fetched on each sync (up to four pages of 25 records per collection) and keeps 30 days locally. Older records are not backfilled.
 - Recoveries are fetched as a single page of 25 and are upserted rather than window-replaced, so a recovery deleted in WHOOP stays cached until its cycle leaves the cache. Cycles, sleeps, and workouts deleted in WHOOP are removed from the window each sync covers.

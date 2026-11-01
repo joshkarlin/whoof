@@ -23,6 +23,8 @@ data class LightToolMetadata(
     val capabilities: List<String> = emptyList(),
     val serverPackage: String,
     val orientation: String? = null,
+    /** Local Whoof addition (not upstream): launcher icon resource, e.g. `@mipmap/ic_launcher`. */
+    val icon: String? = null,
 ) {
     companion object {
         const val FILE_NAME: String = "lighttool.toml"
@@ -62,6 +64,7 @@ data class LightToolMetadata(
                 capabilities = validateCapabilities(tool.tomlStringList("capabilities")),
                 serverPackage = validateServerPackage(tool.tomlString("serverPackage"), allowAltServerPackage),
                 orientation = validateOrientation(tool.tomlString("orientation")),
+                icon = validateIcon(tool.tomlString("icon")),
             )
         }
 
@@ -126,6 +129,15 @@ data class LightToolMetadata(
             return value
         }
 
+        private fun validateIcon(value: String?): String? {
+            if (value == null) return null
+            require(LightToolPolicy.ICON_PATTERN.matches(value)) {
+                "tool.icon must be a resource reference like @mipmap/ic_launcher or " +
+                    "@drawable/ic_launcher (lowercase letters, digits and underscores); got '$value'"
+            }
+            return value
+        }
+
         private fun validatePermissions(values: List<String>?): List<String> {
             val list = values ?: emptyList()
             val seen = mutableSetOf<String>()
@@ -178,6 +190,7 @@ object LightToolPolicy {
     val TOOL_ID_PATTERN: Regex = Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$")
     val VERSION_NAME_PATTERN: Regex =
         Regex("""^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$""")
+    val ICON_PATTERN: Regex = Regex("^@(mipmap|drawable)/[a-z0-9_]+$")
     val TOOL_LABEL_PATTERN: Regex = Regex("^[^\\x00-\\x1f<>]{1,50}$")
     const val MAX_VERSION_CODE: Int = 2_100_000_000
     const val LIGHTOS_SERVER_PACKAGE: String = "com.lightos"

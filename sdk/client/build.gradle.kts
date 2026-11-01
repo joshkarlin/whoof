@@ -22,8 +22,13 @@ android {
     }
     val vapidPublicKey = localProps.getProperty("vapidPublicKey", "")
 
+    // Local Whoof SDK change: see LightQrCodeScanner. Off by default (upstream behaviour).
+    val directCameraPermission =
+        (findProperty("lightSdk.directCameraPermission") as String?)?.toBoolean() ?: false
+
     defaultConfig {
         minSdk = rootProject.ext["minSdk"] as Int
+        buildConfigField("boolean", "DIRECT_CAMERA_PERMISSION", directCameraPermission.toString())
         buildConfigField("String", "LIGHT_VAPID_KEY", "\"$vapidPublicKey\"")
         consumerProguardFiles("consumer-rules.pro")
     }

@@ -44,6 +44,10 @@ object ManifestGenerator {
         val screenOrientation = metadata.orientation?.let {
             "\n            |            android:screenOrientation=\"${xmlAttr(it)}\""
         }.orEmpty()
+        val appIcon = metadata.icon?.let {
+            "\n            |        android:icon=\"${xmlAttr(it)}\"" +
+                "\n            |        android:roundIcon=\"${xmlAttr(it)}\""
+        }.orEmpty()
         val capabilityMarkers = marginBlock(
             metadata.capabilities.flatMap { capability ->
                 listOf(
@@ -90,7 +94,7 @@ object ManifestGenerator {
             """
             |    <application
             |        android:name="com.thelightphone.sdk.LightSdkApplication"
-            |        android:label="${xmlAttr(metadata.label)}"
+            |        android:label="${xmlAttr(metadata.label)}"$appIcon
             |        android:supportsRtl="true"$cleartext
             |        android:theme="@style/LightSdk.Theme.Splash">
             |        <meta-data

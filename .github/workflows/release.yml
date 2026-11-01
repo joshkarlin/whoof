@@ -59,15 +59,16 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # The debug variant: LightOS does not verify Whoof, and only debug builds take the
-      # camera permission directly instead of through the broker. See README "Local SDK signing".
+      # Minified, non-debuggable release build, signed with the SDK development key. The camera
+      # permission goes directly through Android via lightSdk.directCameraPermission (gradle.properties),
+      # because LightOS does not verify Whoof. See README "Local SDK signing".
       - name: Test and build APK
-        run: ./gradlew :tool:testDebugUnitTest :tool:assembleDebug
+        run: ./gradlew :tool:testReleaseUnitTest :tool:assembleRelease
 
       - name: Rename APK
         run: |
           mkdir -p out
-          cp tool/build/outputs/apk/debug/tool-debug.apk \
+          cp tool/build/outputs/apk/release/tool-release.apk \
              "out/whoof-${{ steps.ver.outputs.name }}.apk"
 
       - name: Create GitHub Release

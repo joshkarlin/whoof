@@ -19,6 +19,7 @@ permissions  = ["android.permission.CAMERA"]   # allowlisted permissions only
 capabilities = []                              # allowlisted SDK features
 serverPackage = "com.lightos"                  # LightOS package your tool connects to
 orientation  = "portrait"                      # optional; omit for no orientation lock
+icon         = "@mipmap/ic_launcher"           # optional; Whoof-local addition, see below
 ```
 
 ## Fields
@@ -80,6 +81,15 @@ Must be `com.lightos`. The build fails on any other value unless you pass `-Dlig
 ### `orientation` — optional screen orientation lock
 Set to `"portrait"` to keep the tool in portrait orientation. Omit this field to
 let the system choose the orientation.
+
+### `icon` — optional launcher icon (Whoof-local)
+A resource reference such as `@mipmap/ic_launcher` or `@drawable/ic_launcher`
+(`^@(mipmap|drawable)/[a-z0-9_]+$`). When set, the generated `<application>` gets
+`android:icon` and `android:roundIcon` with this value; the resource lives in
+`tool/src/main/res/`. Omit it for the default Android icon.
+
+> [!NOTE]
+> This field is a local Whoof addition to the SDK plugin, not part of the upstream Light SDK.
 
 ## Permission allowlist
 

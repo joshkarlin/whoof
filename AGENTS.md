@@ -89,10 +89,10 @@ WHOOP's account session refreshes through Cognito; refresh tokens rotate (the sc
 
 ## Releases and SDK upgrades
 
-- Whoof is a fork of the Light SDK repository, as the SDK README recommends; upgrade by merging an SDK release tag into `main`, keeping Whoof's README, `tool/lighttool.toml` and CI, and the debug camera path in `sdk/client/.../LightClientUiUtils.kt`.
+- Whoof is a fork of the Light SDK repository, as the SDK README recommends; upgrade by merging an SDK release tag into `main`, keeping Whoof's README, `tool/lighttool.toml` and CI, and both local SDK changes: the `lightSdk.directCameraPermission` camera flag (`sdk/client/build.gradle.kts`, `sdk/client/.../LightClientUiUtils.kt`, `gradle.properties`) and the `icon` field in `lighttool.toml` (`plugin/` metadata and manifest generator, `docs/tool_metadata/README.md`).
 - `refs/tags/v*` on `origin` are Whoof releases only: pushing one runs `.github/workflows/release.yml`. Keep the SDK's tags out of `refs/tags`, because they use the same `vX.Y.Z` names. In a clone, set `git config remote.upstream.tagOpt --no-tags` and `git config --add remote.upstream.fetch '+refs/tags/*:refs/upstream-tags/*'`, then merge `upstream-tags/v0.2.3` and so on.
 - Push release tags one at a time (`git push origin refs/tags/v0.2.0-rc.1`), never with `git push --tags`.
-- Install on the LP3 with `adb install -r --no-incremental`. Releases ship the debug APK, signed with the SDK development key.
+- Install on the LP3 with `adb install -r --no-incremental`. Releases ship the minified, non-debuggable release APK, signed with the SDK development key.
 
 ## Documentation and project state
 
