@@ -23,8 +23,10 @@ internal class WhoopPrivateService(
         operations.withLock { client.completeLogin(challenge, code).also { acceptLogin(it) } }
 
     suspend fun provision(payload: String) = operations.withLock {
-        val session = PrivateWhoopProvisioning.parse(payload, clock())
-        acceptSession(session)
+        when (val provisioned = PrivateWhoopProvisioning.parsePayload(payload, clock())) {
+            is PrivateWhoopProvisioned.Session -> acceptSession(provisioned.session)
+            is PrivateWhoopProvisioned.RefreshToken -> acceptScannedRefreshToken(provisioned.value)
+        }
     }
 
     suspend fun checkConnection() = operations.withLock {
@@ -111,6 +113,20 @@ internal class WhoopPrivateService(
 
     private suspend fun acceptLogin(result: PrivateWhoopLoginResult) {
         if (result is PrivateWhoopLoginResult.Authenticated) acceptSession(result.session)
+    }
+
+    /** v=2: the scanned token is single-use, so persist the rotated session before anything else can fail. */
+    private suspend fun acceptScannedRefreshToken(refreshToken: String) {
+        val session = try {
+            client.refreshFromToken(refreshToken)
+        } catch (error: PrivateWhoopException) {
+            if (error.reason == PrivateWhoopError.Rejected) throw PrivateWhoopException(PrivateWhoopError.Unauthorized)
+            throw error
+        }
+        requirePrivate(session.expiresAtEpochSeconds > clock().epochSecond + 60)
+        val previous = store.load()
+        store.save(previous.copy(session = session, draft = previous.draft?.takeUnless { it.status == PrivateActivityStatus.Prepared }))
+        client.checkAccount(session)
     }
 
     private suspend fun acceptSession(session: PrivateWhoopSession) {

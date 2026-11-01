@@ -4,6 +4,19 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.viewModelScope
+import com.thelightphone.sdk.LightScreen
+import com.thelightphone.sdk.LightViewModel
+import com.whoof.privateapi.PrivateWhoopServices
+import com.whoof.privateapi.WhoopPrivateService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
@@ -20,15 +33,51 @@ internal enum class SettingsAction {
     Disconnect,
 }
 
+internal class SettingsViewModel(
+    private val service: WhoopPrivateService,
+) : LightViewModel<SettingsAction>() {
+    /** Null until the stored session has been read, so the row never flashes the wrong label. */
+    private val _signedIn = MutableStateFlow<Boolean?>(null)
+    val signedIn: StateFlow<Boolean?> = _signedIn
+
+    override fun onScreenShow(screen: SimpleLightScreen<SettingsAction>) {
+        super.onScreenShow(screen)
+        refresh()
+    }
+
+    fun refresh() {
+        viewModelScope.launch {
+            _signedIn.value = try {
+                withContext(Dispatchers.IO) { service.state().session != null }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+}
+
 internal class SettingsScreen(
     sealedActivity: SealedLightActivity,
-) : SimpleLightScreen<SettingsAction>(sealedActivity) {
+) : LightScreen<SettingsAction, SettingsViewModel>(sealedActivity) {
+    override val viewModelClass: Class<SettingsViewModel> = SettingsViewModel::class.java
+
+    override fun createViewModel(): SettingsViewModel =
+        SettingsViewModel(PrivateWhoopServices.getInstance(lightContext))
+
     @Composable
     override fun Content() {
+        val signedIn by viewModel.signedIn.collectAsState()
         WhoofPage(title = "SETTINGS", onBack = { goBack() }) {
             Column(modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp())) {
                 SettingsRow("Sync now") { goBack(SettingsAction.SyncNow) }
                 SettingsRow("Replace token") { goBack(SettingsAction.ReplaceToken) }
+                when (signedIn) {
+                    true -> SettingsRow("WHOOP account") { navigateTo(::AccountScreen) { viewModel.refresh() } }
+                    false -> SettingsRow("Sign in to WHOOP") { navigateTo(::SignInScreen) { viewModel.refresh() } }
+                    null -> Unit
+                }
                 SettingsRow("Disconnect and delete data") {
                     navigateTo(::ConfirmDisconnectScreen) { confirmed ->
                         if (confirmed) goBack(SettingsAction.Disconnect)

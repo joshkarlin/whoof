@@ -26,7 +26,23 @@ class ProvisionError(Exception):
     """An intentionally non-sensitive local provisioning error."""
 
 
+def refresh_provisioning_uri(tokens: SessionTokens) -> str:
+    """v=2: only the refresh token; the phone refreshes (and thereby rotates) it on scan."""
+    token = tokens.refresh_token
+    if (
+        not isinstance(token, str)
+        or not 20 <= len(token) <= MAX_TOKEN_LENGTH
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in token)
+    ):
+        raise ProvisionError("Session credentials are not valid for provisioning.")
+    uri = "whoof://private-provision?" + urlencode({"v": 2, "refresh_token": token})
+    if len(uri.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise ProvisionError("Session is too large for a provisioning QR.")
+    return uri
+
+
 def provisioning_uri(tokens: SessionTokens, *, now: float | None = None) -> str:
+    """v=1: full session. Too large for current browser-session tokens; kept for compatibility."""
     current_time = time.time() if now is None else now
     expiry = tokens.expires_at
     if (
@@ -95,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Local PNG destination")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file")
+    parser.add_argument("--full-session", action="store_true",
+                        help="Emit the larger v=1 QR (access and refresh token) instead of v=2")
     args = parser.parse_args(argv)
 
     try:
@@ -107,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             client = PrivateWhoopClient()
             tokens = ready_session(client, PRIVATE_DIR)
             client.check_account(tokens)
-            uri = provisioning_uri(tokens)
+            uri = provisioning_uri(tokens) if args.full_session else refresh_provisioning_uri(tokens)
             write_private_qr(uri, output, overwrite=args.overwrite)
     except (ProvisionError, PrivateApiError) as error:
         print(str(error), file=sys.stderr)
@@ -117,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"Private provisioning QR saved to {output}")
+    if not args.full_session:
+        print(
+            "Notice: the phone rotates the refresh token when it scans this QR, so the session saved "
+            "on this computer will stop working once the phone connects. Delete the QR image after scanning."
+        )
     return 0
 
 

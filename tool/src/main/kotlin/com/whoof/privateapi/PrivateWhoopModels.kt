@@ -11,6 +11,9 @@ internal enum class PrivateWhoopError {
     InvalidInput, Unauthorized, Rejected, RateLimited, Unavailable, InvalidResponse,
     UnsupportedChallenge, ReconnectRequired, ConfirmationRequired, SubmissionUncertain,
     AlreadyAttempted, StorageFailed,
+    // Fixed Cognito sign-in outcomes, selected only from the error `__type`.
+    CredentialsRejected, AccountNotFound, PasswordResetRequired, AccountNotConfirmed,
+    WrongCode, CodeExpired, TooManyAttempts,
 }
 
 /** Fixed error categories only: never retain a remote body or transport exception. */
@@ -100,6 +103,8 @@ internal interface WhoopPrivateTransport {
     suspend fun beginLogin(email: String, password: String): PrivateWhoopLoginResult
     suspend fun completeLogin(challenge: PrivateWhoopChallenge, code: String): PrivateWhoopLoginResult
     suspend fun refresh(session: PrivateWhoopSession): PrivateWhoopSession
+    /** Exchange a scanned (v=2) refresh token. The token is single-use: WHOOP rotates it. */
+    suspend fun refreshFromToken(refreshToken: String): PrivateWhoopSession
     suspend fun checkAccount(session: PrivateWhoopSession)
     suspend fun createActivity(session: PrivateWhoopSession, payload: PrivateActivityPayload, timeZone: String): String
     fun close() = Unit

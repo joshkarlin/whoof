@@ -5,6 +5,7 @@ import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -102,6 +103,34 @@ class PrivateWhoopPersistenceTest {
         ).forEach { uri ->
             val error = assertFailsWith<PrivateWhoopException> { PrivateWhoopProvisioning.parse(uri, now) }
             assertEquals(PrivateWhoopError.InvalidInput, error.reason)
+        }
+    }
+
+    @Test
+    fun refreshTokenProvisioningParsesOnlyVersionTwoWithExactFields() {
+        val now = Instant.ofEpochSecond(TEST_NOW)
+        val token = "import-refresh-token-synthetic-123"
+        val parsed = PrivateWhoopProvisioning.parsePayload("whoof://private-provision?v=2&refresh_token=$token", now)
+        assertEquals(token, assertIs<PrivateWhoopProvisioned.RefreshToken>(parsed).value)
+        assertFalse(parsed.toString().contains(token))
+
+        listOf(
+            "whoof://private-provision?v=2",
+            "whoof://private-provision?v=2&refresh_token=short",
+            "whoof://private-provision?v=2&refresh_token=$token&access_token=import-access-token-synthetic-123",
+            "whoof://private-provision?v=2&refresh_token=$token&expires_at=${TEST_NOW + 61}",
+            "whoof://private-provision?v=2&refresh_token=$token&refresh_token=$token",
+            "whoof://private-provision?v=3&refresh_token=$token",
+            "whoof://private-provision?v=2&refresh_token=${"x".repeat(2_049)}",
+            "whoof://private-provision?v=2&refresh_token=$token&pad=${"x".repeat(2_900)}",
+            "whoof://provision?v=2&refresh_token=$token",
+        ).forEach { uri ->
+            val error = assertFailsWith<PrivateWhoopException> { PrivateWhoopProvisioning.parsePayload(uri, now) }
+            assertEquals(PrivateWhoopError.InvalidInput, error.reason)
+        }
+        // The v=1-only entry point must not accept a refresh-only payload.
+        assertFailsWith<PrivateWhoopException> {
+            PrivateWhoopProvisioning.parse("whoof://private-provision?v=2&refresh_token=$token", now)
         }
     }
 

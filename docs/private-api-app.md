@@ -32,9 +32,11 @@ Generate a private QR from the existing local account session:
 uv run --frozen python setup/provision_private_session.py
 ```
 
-The helper validates the account and writes `local/private-api/whoof-private-provision.png`. It may refresh an expired local session. `--overwrite` is required to replace an existing image. Scan locally and delete the image after connection; never upload it or use an online QR generator.
+The helper validates the account and writes `local/private-api/whoof-private-provision.png`. It refreshes the local session only if it has expired. The QR is v=2 by default; `--full-session` emits the larger v=1 QR, which no longer fits for browser-imported sessions. `--overwrite` is required to replace an existing image. Scan locally and delete the image after connection; never upload it or use an online QR generator.
 
-The exact URI is `whoof://private-provision` with fields `v=1`, `access_token`, `refresh_token`, and `expires_at` (absolute Unix seconds). The parser rejects public OAuth QRs, extra/duplicate fields, oversized tokens/payloads, and expiry within 60 seconds. The phone verifies the session against WHOOP before saving it. Decoding a QR alone does not establish that a session is genuine.
+The default URI is `whoof://private-provision?v=2&refresh_token=...` with exactly those two fields (a browser-session access token is about 1,200 characters and the refresh token 1,700-1,800, so the v=1 form exceeds the 2,900-byte QR budget). On scan the phone refreshes through the Cognito proxy, persists the returned session immediately, then verifies the account against WHOOP. `v=1` (`access_token`, `refresh_token`, `expires_at` as absolute Unix seconds) is still parsed. The parser rejects public OAuth QRs, extra/duplicate fields, oversized tokens/payloads, and (for v=1) expiry within 60 seconds. Decoding a QR alone does not establish that a session is genuine.
+
+Refresh tokens rotate: REFRESH_TOKEN_AUTH was live-verified from the computer on 2026-11-01 (it returns a 24-hour access token and a new refresh token), so treat the scanned token as single-use. Once the phone connects, the session saved on the computer stops working; delete the QR image after scanning. If the phone cannot refresh (Unauthorized), it shows "Session expired. Make a new QR." If the replacement token has been persisted but the account check fails, the phone keeps the new session. If the refresh response omits a new refresh token, the scanned one is kept.
 
 Screen-facing calls:
 
@@ -66,7 +68,7 @@ An expired session is refreshed and saved before submission. An unauthorized acc
 
 Map `PrivateWhoopException.reason` to fixed, concise messages. Handle `ReconnectRequired`, `RateLimited`, `ConfirmationRequired`, `AlreadyAttempted`, and `SubmissionUncertain` distinctly. Never display raw HTTP bodies, exception causes, credentials, or personal health JSON. Cancellation should cancel the screen operation, not become an automatic resubmit.
 
-UI wiring, real-phone scanning, device persistence/refresh, and one explicitly selected live activity submission require separate verification. Local JVM tests do not prove those work on hardware. This package does not integrate private sleep/strain/detail endpoints or journal/alarms. No controlled-builder or Light-approval claim is implied by adding the backend.
+The phone can scan the private provisioning QR from Sign in (camera icon, top right; unverified on the LP3). Browser-session refresh through the proxy was live-verified from the computer on 2026-11-01 but not yet from the phone. Remaining UI wiring, real-phone scanning, device persistence/refresh, and one explicitly selected live activity submission require separate verification. Local JVM tests do not prove those work on hardware. This package does not integrate private sleep/strain/detail endpoints or journal/alarms. No controlled-builder or Light-approval claim is implied by adding the backend.
 
 ## Verification
 

@@ -29,6 +29,52 @@ class WhoopPrivateServiceTest {
     }
 
     @Test
+    fun refreshTokenProvisioningRefreshesThenSavesThenChecks() = runBlocking {
+        val events = mutableListOf<String>()
+        val store = MemoryPrivateWhoopStore(events = events)
+        val client = FakeWhoopPrivateTransport(events)
+
+        service(store, client).provision(refreshProvisioningUri())
+
+        assertEquals(listOf("refresh", "save:none", "check"), events)
+        assertEquals(listOf("import-refresh-token-synthetic-123"), client.scannedRefreshTokens)
+        assertEquals(client.refreshResult, store.current.session)
+    }
+
+    @Test
+    fun refreshTokenProvisioningFailureSavesNothing() = runBlocking {
+        val original = PrivateWhoopState(session = SESSION)
+        for (failure in listOf(PrivateWhoopError.Unauthorized, PrivateWhoopError.Rejected)) {
+            val store = MemoryPrivateWhoopStore(original)
+            val client = FakeWhoopPrivateTransport().apply {
+                refreshFailure = PrivateWhoopException(failure)
+            }
+
+            assertPrivateError(PrivateWhoopError.Unauthorized) {
+                service(store, client).provision(refreshProvisioningUri())
+            }
+
+            assertEquals(original, store.current)
+            assertEquals(0, store.saveCount)
+            assertEquals(0, client.checkCount)
+        }
+    }
+
+    @Test
+    fun refreshTokenProvisioningKeepsRotatedSessionWhenAccountCheckFails() = runBlocking {
+        val store = MemoryPrivateWhoopStore()
+        val client = FakeWhoopPrivateTransport().apply {
+            checkFailures += PrivateWhoopException(PrivateWhoopError.Unavailable)
+        }
+
+        assertPrivateError(PrivateWhoopError.Unavailable) {
+            service(store, client).provision(refreshProvisioningUri())
+        }
+
+        assertEquals(client.refreshResult, store.current.session)
+    }
+
+    @Test
     fun invalidImportLeavesPreviouslyStoredSessionUntouched() = runBlocking {
         val original = PrivateWhoopState(session = SESSION)
         val store = MemoryPrivateWhoopStore(original)
@@ -496,6 +542,7 @@ private class FakeWhoopPrivateTransport(
     var receipt: String = UUID.randomUUID().toString()
     var beforeCreate: (suspend () -> Unit)? = null
     val checkFailures = mutableListOf<Throwable>()
+    val scannedRefreshTokens = mutableListOf<String>()
     var checkCount = 0
         private set
     var refreshCount = 0
@@ -516,6 +563,14 @@ private class FakeWhoopPrivateTransport(
     override suspend fun refresh(session: PrivateWhoopSession): PrivateWhoopSession {
         events += "refresh"
         refreshCount++
+        refreshFailure?.let { throw it }
+        return refreshResult
+    }
+
+    override suspend fun refreshFromToken(refreshToken: String): PrivateWhoopSession {
+        events += "refresh"
+        refreshCount++
+        scannedRefreshTokens += refreshToken
         refreshFailure?.let { throw it }
         return refreshResult
     }
@@ -554,3 +609,6 @@ private fun importedSession() = session(
     label = "import",
     expiry = NOW_EPOCH + 3_600,
 )
+
+private fun refreshProvisioningUri(refresh: String = "import-refresh-token-synthetic-123") =
+    "whoof://private-provision?v=2&refresh_token=$refresh"

@@ -41,7 +41,7 @@ internal class WhoopPrivateClient internal constructor(
 
     override suspend fun beginLogin(email: String, password: String): PrivateWhoopLoginResult {
         requirePrivate(email.isNotBlank() && password.isNotEmpty())
-        val response = auth("InitiateAuth", buildJsonObject {
+        val response = auth("InitiateAuth", signIn = true, body = buildJsonObject {
             put("AuthFlow", "USER_PASSWORD_AUTH")
             put("ClientId", "")
             put("AuthParameters", buildJsonObject {
@@ -60,7 +60,7 @@ internal class WhoopPrivateClient internal constructor(
             challenge.name in MFA_FIELDS && challenge.session.isNotBlank() && challenge.session.length <= 16_384 &&
                 challenge.username.isNotBlank() && code.isNotBlank(),
         )
-        val response = auth("RespondToAuthChallenge", buildJsonObject {
+        val response = auth("RespondToAuthChallenge", signIn = true, body = buildJsonObject {
             put("ClientId", "")
             put("ChallengeName", challenge.name)
             put("Session", challenge.session)
@@ -72,13 +72,17 @@ internal class WhoopPrivateClient internal constructor(
         return loginResult(response, challenge.username)
     }
 
-    override suspend fun refresh(session: PrivateWhoopSession): PrivateWhoopSession {
+    override suspend fun refresh(session: PrivateWhoopSession): PrivateWhoopSession =
+        refreshFromToken(session.refreshToken)
+
+    override suspend fun refreshFromToken(refreshToken: String): PrivateWhoopSession {
+        requirePrivate(validPrivateToken(refreshToken))
         val response = auth("InitiateAuth", buildJsonObject {
             put("AuthFlow", "REFRESH_TOKEN_AUTH")
             put("ClientId", "")
-            put("AuthParameters", buildJsonObject { put("REFRESH_TOKEN", session.refreshToken) })
+            put("AuthParameters", buildJsonObject { put("REFRESH_TOKEN", refreshToken) })
         })
-        return tokens(response, session.refreshToken)
+        return tokens(response, refreshToken)
     }
 
     override suspend fun checkAccount(session: PrivateWhoopSession) {
@@ -105,14 +109,18 @@ internal class WhoopPrivateClient internal constructor(
         request.close()
     }
 
-    private suspend fun auth(operation: String, body: JsonObject): JsonObject {
-        val response = execute(PrivateHttpRequest("POST", AUTH_URL, authHeaders(operation), body.toString()))
+    private suspend fun auth(operation: String, body: JsonObject, signIn: Boolean = false): JsonObject {
+        val response = execute(
+            PrivateHttpRequest("POST", AUTH_URL, authHeaders(operation), body.toString()),
+            signInErrors = signIn,
+        )
         return response.json
     }
 
     private suspend fun execute(
         request: PrivateHttpRequest,
         ambiguousWrite: Boolean = false,
+        signInErrors: Boolean = false,
     ): PrivateHttpResponse {
         val response = try {
             this.request.execute(request)
@@ -125,6 +133,9 @@ internal class WhoopPrivateClient internal constructor(
             throw privateError(if (ambiguousWrite) PrivateWhoopError.SubmissionUncertain else PrivateWhoopError.InvalidResponse)
         }
         if (response.status !in 200..299) {
+            // Only the fixed `__type` is consulted; the free-text message is never read.
+            val typed = if (signInErrors && response.status in 400..499) signInReason(response.body) else null
+            if (typed != null) throw privateError(typed)
             val reason = when (response.status) {
                 401 -> PrivateWhoopError.Unauthorized
                 429 -> PrivateWhoopError.RateLimited
@@ -144,6 +155,18 @@ internal class WhoopPrivateClient internal constructor(
             throw privateError(if (ambiguousWrite) PrivateWhoopError.SubmissionUncertain else PrivateWhoopError.InvalidResponse)
         }
         return PrivateHttpResponse(response.status, response.body, parsed)
+    }
+
+    private fun signInReason(body: ByteArray): PrivateWhoopError? {
+        if (body.size > MAX_ERROR_BYTES) return null
+        val type = try {
+            json.parseToJsonElement(body.decodeToString()).jsonObject["__type"]?.stringValue()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        return SIGN_IN_ERRORS[type.substringAfterLast('#')]
     }
 
     private fun loginResult(response: JsonObject, fallbackUsername: String): PrivateWhoopLoginResult {
@@ -258,6 +281,17 @@ internal class WhoopPrivateClient internal constructor(
         const val ACTIVITY_URL = "https://api.prod.whoop.com/core-details-bff/v0/create-activity?apiVersion=7"
         const val DEFAULT_TIME_ZONE = "Europe/London"
         const val MAX_RESPONSE_BYTES = 1_048_576
+        const val MAX_ERROR_BYTES = 16_384
+        val SIGN_IN_ERRORS = mapOf(
+            "NotAuthorizedException" to PrivateWhoopError.CredentialsRejected,
+            "UserNotFoundException" to PrivateWhoopError.AccountNotFound,
+            "PasswordResetRequiredException" to PrivateWhoopError.PasswordResetRequired,
+            "UserNotConfirmedException" to PrivateWhoopError.AccountNotConfirmed,
+            "CodeMismatchException" to PrivateWhoopError.WrongCode,
+            "ExpiredCodeException" to PrivateWhoopError.CodeExpired,
+            "TooManyRequestsException" to PrivateWhoopError.TooManyAttempts,
+            "LimitExceededException" to PrivateWhoopError.TooManyAttempts,
+        )
         const val AUTH_USER_AGENT = "aws-sdk-swift/1.5.86 ua/2.1 api/cognito_identity_provider#1.5.86 os/ios#26.3.1 lang/swift#5.10 m/D,N,Z,b"
         val MFA_FIELDS = mapOf(
             "SMS_MFA" to "SMS_MFA_CODE",

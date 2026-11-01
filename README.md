@@ -181,7 +181,8 @@ Experimental private-API work includes the local setup helper and a separate And
 - [x] Validate read-only private workout detail, sleep need, strain target, and detailed sleep endpoints ([results and schema notes](docs/private-api-read-tests.md))
 - [x] Implement and unit-test the isolated Android private login/session provisioning, encrypted storage codec, and explicitly confirmed activity backend (46 tests pass in an isolated JVM harness; not device validation)
 - [ ] Verify the full Android build with the private backend (blocked fetching Light keyboard `0.0.16`; GitHub Packages returns 401)
-- [ ] Integrate private connection and activity controls into the UI, then validate login and one user-selected submission on the Light Phone
+- [x] Add on-device WHOOP account sign-in (Settings > Sign in to WHOOP: email, password, optional verification code; Cognito `__type` errors mapped to fixed messages; sign out from Settings > WHOOP account; the Sign in camera icon scans the v=2 private-session QR (refresh token only; the phone refreshes and rotates it) from `setup/provision_private_session.py`, unverified on the LP3; browser-session refresh was live-verified from the computer on 2026-11-01 but not from the phone). Unit-tested on the JVM; not yet verified on the LP3
+- [ ] Integrate private activity controls into the UI, then validate account sign-in and one user-selected submission on the Light Phone
 
 - [x] Implement the POC access-token provisioning bundle and recovery API call
 - [x] Complete live local OAuth token exchange and QR provisioning
@@ -210,6 +211,7 @@ Experimental private-API work includes the local setup helper and a separate And
 - What API update latency should users expect after the official app synchronizes a strap?
 - Which privacy and review documents will Light require for a tool displaying health data?
 - Should the setup helper support only macOS initially, or be cross-platform from its first release?
+- Does on-device password sign-in succeed on the LP3? Earlier direct password attempts returned HTTP 401; the sign-in screens now surface the specific Cognito error type. The SDK text editor has no password masking or numeric keyboard, so the password is visible while typed.
 - Do the WHOOP-style data colours (especially yellow recovery and pale REM) keep enough contrast on the LP3 display and in the LightOS light theme?
 
 ## Known issues

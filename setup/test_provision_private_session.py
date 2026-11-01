@@ -38,6 +38,44 @@ class ProvisionPrivateSessionTest(unittest.TestCase):
             uri,
         )
 
+    def test_v2_uri_has_only_version_and_refresh_token(self) -> None:
+        uri = provision.refresh_provisioning_uri(self.tokens)
+        parsed = urlsplit(uri)
+        self.assertEqual(("whoof", "private-provision", ""), (parsed.scheme, parsed.netloc, parsed.path))
+        self.assertEqual({"v": ["2"], "refresh_token": [REFRESH]}, parse_qs(parsed.query, strict_parsing=True))
+        self.assertEqual("whoof://private-provision?v=2&refresh_token=" + REFRESH, uri)
+
+    def test_v2_fits_with_browser_session_sized_tokens(self) -> None:
+        tokens = SessionTokens("a" * 1300, "b" * 1800, NOW + 3600)
+        uri = provision.refresh_provisioning_uri(tokens)
+        self.assertLessEqual(len(uri.encode("utf-8")), 2900)
+        with self.assertRaises(provision.ProvisionError):
+            provision.provisioning_uri(tokens, now=NOW)
+
+    def test_v2_token_validation_and_size_cap(self) -> None:
+        provision.refresh_provisioning_uri(SessionTokens(ACCESS, "x" * 2048, NOW))
+        for token in ("x" * 19, "x" * 2049, "x" * 19 + "\n", "x" * 19 + " "):
+            with self.subTest(length=len(token)):
+                with self.assertRaises(provision.ProvisionError):
+                    provision.refresh_provisioning_uri(SessionTokens(ACCESS, token, NOW))
+
+    def test_main_emits_v2_and_prints_rotation_notice(self) -> None:
+        client = Mock()
+        written: list[str] = []
+        with patch.object(provision, "PRIVATE_DIR", self.root / "account"), patch.object(
+            provision, "exclusive_session", side_effect=lambda _directory: contextlib.nullcontext(),
+        ), patch.object(provision, "PrivateWhoopClient", return_value=client), patch.object(
+            provision, "ready_session", return_value=self.tokens,
+        ), patch.object(provision, "write_private_qr", side_effect=lambda uri, *_a, **_k: written.append(uri)):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = provision.main(["--output", str(self.root / "private.png")])
+        self.assertEqual(0, result)
+        self.assertEqual(["whoof://private-provision?v=2&refresh_token=" + REFRESH], written)
+        self.assertIn("rotates", stdout.getvalue())
+        self.assertIn("Delete the QR image", stdout.getvalue())
+        self.assertNotIn(REFRESH, stdout.getvalue())
+
     def test_expiry_must_be_more_than_sixty_seconds_after_now(self) -> None:
         with self.assertRaises(provision.ProvisionError):
             provision.provisioning_uri(SessionTokens(ACCESS, REFRESH, NOW + 60), now=NOW)

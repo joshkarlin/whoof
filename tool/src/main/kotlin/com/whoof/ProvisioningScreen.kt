@@ -18,6 +18,7 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 
 internal class ProvisioningScreen(
     sealedActivity: SealedLightActivity,
+    private val title: String = "CONNECT WHOOP",
 ) : SimpleLightScreen<String>(sealedActivity) {
     @Composable
     override fun Content() {
@@ -26,7 +27,7 @@ internal class ProvisioningScreen(
 
         LightTheme(colors = colors) {
             LightQrCodeScanner(
-                title = "CONNECT WHOOP",
+                title = title,
                 onScanned = { scannedValue = it },
                 onBack = { goBack() },
                 modifier = Modifier.background(LightThemeTokens.colors.background),
