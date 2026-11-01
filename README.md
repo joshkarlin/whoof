@@ -72,7 +72,7 @@ adb install -r --no-incremental whoof-0.2.0.apk
 
 `-r` upgrades in place and keeps your session and cached data. `--no-incremental` matters on the
 LP3: an incremental install streams the APK after reporting success, and if the stream breaks,
-Android deletes the half-installed app; until then LightOS rejects it with "caller not verified". Builds are signed with the public
+Android deletes the half-installed app and its data. Builds are signed with the public
 Light SDK development key (see [Local SDK signing](#local-sdk-signing)), so a release installs over
 a local debug build and the other way round.
 
@@ -111,11 +111,12 @@ Settings > WHOOP account > SIGN OUT ends the session and clears the cache, sync 
 This repository inherits `sdk/keys/lightsdk-dev.jks` and its history directly from the official
 [Light SDK](https://github.com/lightphone/light-sdk). Light publishes that certificate for local SDK
 development and the LightOS emulator. Whoof's debug and release builds are both signed with it.
-On the LP3 tested (November 2026), LightOS lets a tool signed with this key use the SDK service
-(camera broker, background jobs) only when the build is debuggable: a full install of the
-minified release build was rejected with "caller not verified", while the debug build of the same
-code was accepted. Releases therefore ship the debug build. A private Whoof key is untested, because
-that test was spoiled by an incremental install; see Known issues. Do not
+On the LP3 tested (November 2026), LightOS's SDK service rejects Whoof with "caller not
+verified" whether it is signed with this key or a private one, and in debug and release builds, so
+brokered SDK features are unavailable. The QR scanner still works in debug builds because Whoof's
+SDK copy asks Android for the camera permission directly when `BuildConfig.DEBUG` is set
+(`sdk/client/.../LightClientUiUtils.kt`, a local SDK change). Releases therefore ship the debug
+build; see Known issues. Do not
 replace the key or place private signing material in this repository.
 
 The repository is expected to contain two independently buildable parts:
@@ -235,9 +236,9 @@ Whoof now has a single sign-in, the WHOOP account session described above. See [
 
 ## Known issues
 
-- Whoof is signed with the public Light SDK development key, because LightOS may reject SDK tools signed with any other key. Anyone with that key can sign an APK that installs over Whoof and reads its stored session, so install Whoof only from this repository's releases or your own build.
-- Releases are debuggable builds, because LightOS rejects a release build signed with the development key. A debuggable app's data can be read over USB with `adb run-as` by anyone who can unlock the phone and has USB debugging enabled.
-- A LightOS update that stops trusting the development key would disable Whoof's QR scanner and background sync, and Whoof has no workaround short of being signed by Light.
+- Whoof is signed with the public Light SDK development key. A private key would not lose any LightOS access, since LightOS rejects Whoof either way, but switching keys needs one uninstall. Anyone with that key can sign an APK that installs over Whoof and reads its stored session, so install Whoof only from this repository's releases or your own build.
+- Releases are debuggable builds, because the QR scanner's camera permission only works through the debug-only direct permission path. A debuggable app's data can be read over USB with `adb run-as` by anyone who can unlock the phone and has USB debugging enabled.
+- LightOS's SDK service does not verify Whoof, so any brokered SDK feature (beyond the debug-only camera path) is unavailable unless Light signs the tool.
 
 - History covers the last 14 days fetched on each sync (up to four pages of 25 records per collection) and keeps 30 days locally. Older records are not backfilled.
 - Recoveries are fetched as a single page of 25 and are upserted rather than window-replaced, so a recovery deleted in WHOOP stays cached until its cycle leaves the cache. Cycles, sleeps, and workouts deleted in WHOOP are removed from the window each sync covers.

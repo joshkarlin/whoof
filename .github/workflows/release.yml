@@ -60,8 +60,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      # The debug variant: LightOS admits a tool signed with the Light SDK development key to
-      # the SDK service only when it is debuggable. See README "Local SDK signing".
+      # The debug variant: LightOS does not verify Whoof, and only debug builds take the
+      # camera permission directly instead of through the broker. See README "Local SDK signing".
       - name: Test and build APK
         env:
           GH_PACKAGES_USER: ${{ github.actor }}
