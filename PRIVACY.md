@@ -1,6 +1,6 @@
 # Whoof Privacy Policy
 
-Last updated: August 2, 2026
+Last updated: November 1, 2026
 
 Whoof is an unofficial, read-only WHOOP companion for the Light Phone III. It is intended for
 developers and technically capable users. Whoof is not affiliated with or endorsed by WHOOP or
@@ -10,18 +10,19 @@ Light.
 
 Whoof processes:
 
-- A short-lived WHOOP OAuth access token that the user provisions by scanning a locally generated
-  QR code.
-- Recovery information returned for that user by the official WHOOP Developer API, including the
-  recovery score and related values displayed by the application.
+- WHOOP OAuth credentials that the user provisions by scanning a locally generated QR code: the
+  user's own WHOOP Developer client ID and secret, an access token, and a rotating refresh token.
+- Recovery, cycle (day strain), sleep, and workout records returned for that user by the official
+  WHOOP Developer API, including scores, heart-rate values, sleep-stage totals, and workout
+  heart-rate zone durations.
 
-The current proof of concept requests only the `read:recovery` OAuth scope. It does not request an
-`offline` scope or store a refresh token.
+Whoof requests the `read:recovery`, `read:cycles`, `read:sleep`, `read:workout`, and `offline`
+OAuth scopes. It does not request profile or body-measurement access.
 
 ## How data is used
 
-Whoof uses the access token only to request the user's recovery information directly from the
-official WHOOP API and display it on the Light Phone. Whoof does not use WHOOP data for advertising,
+Whoof uses the credentials only to request the user's records directly from the official WHOOP API
+and display them on the Light Phone. Whoof does not use WHOOP data for advertising,
 profiling, medical advice, or any unrelated purpose.
 
 Whoof is a general-wellness tool, not a medical device. Its output must not be used to make medical
@@ -29,17 +30,22 @@ decisions.
 
 ## Storage and retention
 
-The access token is stored only on the user's Light Phone. It is encrypted with an AES-GCM key held
-by Android Keystore. The current proof of concept keeps the latest recovery response in application
-memory for display and does not persist recovery records to a local database.
+Credentials are stored only on the user's Light Phone, encrypted with an AES-GCM key held by Android
+Keystore.
 
-Disconnecting in Whoof deletes the locally stored access token. Uninstalling Whoof deletes its local
+WHOOP records from the last 30 days are cached in a local database on the Light Phone so the
+application remains useful offline. Records older than 30 days are deleted at the next successful
+synchronization. The time of the last successful synchronization is stored as a nonsensitive
+preference. The cache is not encrypted separately from Android's application-private storage.
+
+Disconnecting in Whoof (Settings, then "Disconnect and delete data") deletes the stored credentials,
+the cached WHOOP records, and the synchronization time. Uninstalling Whoof deletes its local
 application data. Access already granted to the WHOOP application may also be revoked through the
 user's WHOOP account or by deleting the application in the WHOOP Developer Dashboard.
 
 ## Data sharing and network services
 
-Whoof sends the access token only to WHOOP over HTTPS as authorization for requests to the official
+Whoof sends credentials only to WHOOP over HTTPS as authorization for requests to the official
 WHOOP Developer API. It does not operate or use a developer-controlled backend, data relay,
 analytics service, advertising service, telemetry service, or crash-reporting service.
 

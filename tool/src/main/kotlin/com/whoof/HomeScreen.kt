@@ -1,211 +1,238 @@
 package com.whoof
 
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.lifecycle.viewModelScope
 import com.thelightphone.sdk.InitialScreen
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
+import com.thelightphone.sdk.ui.LightBarButton
+import com.thelightphone.sdk.ui.LightBottomBar
+import com.thelightphone.sdk.ui.LightIcons
+import com.thelightphone.sdk.ui.LightScrollView
 import com.thelightphone.sdk.ui.LightText
 import com.thelightphone.sdk.ui.LightTextVariant
-import com.thelightphone.sdk.ui.LightTheme
-import com.thelightphone.sdk.ui.LightThemeController
-import com.thelightphone.sdk.ui.LightThemeTokens
-import com.thelightphone.sdk.ui.lightClickable
+import com.thelightphone.sdk.ui.gridUnitsAsDp
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.IOException
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.util.Locale
+import kotlinx.coroutines.withTimeoutOrNull
 
-internal sealed interface HomeState {
-    data object Starting : HomeState
-    data object NotConnected : HomeState
-    data object Loading : HomeState
-    data object NoData : HomeState
-    data object AuthorizationExpired : HomeState
-    data object Offline : HomeState
-    data class Ready(val today: TodayModel) : HomeState
-    data class ApiError(val message: String, val connected: Boolean) : HomeState
+private const val AUTO_SYNC_INTERVAL_MILLIS = 5 * 60 * 1000L
+private const val MAX_FAILURE_BACKOFF_MILLIS = 60 * 60 * 1000L
+private const val RATE_LIMIT_HOLD_MILLIS = 30 * 60 * 1000L
+private const val PULL_THRESHOLD_UNITS = 3f
+private const val PULL_RESISTANCE = 0.5f
+private const val SYNC_START_WAIT_MILLIS = 1_000L
+
+internal enum class Connection {
+    Starting,
+    NotConnected,
+    Connected,
 }
+
+internal sealed interface SyncStatus {
+    data object Idle : SyncStatus
+    data object Syncing : SyncStatus
+    data object Offline : SyncStatus
+    data object AuthorizationExpired : SyncStatus
+    data class Failed(val message: String, val rateLimited: Boolean = false) : SyncStatus
+}
+
+internal data class HomeUiState(
+    val connection: Connection = Connection.Starting,
+    /** Null until the cache has been read once, so the empty state never flashes during loading. */
+    val days: List<DaySummary>? = null,
+    val sync: SyncStatus = SyncStatus.Idle,
+    val lastSyncMillis: Long? = null,
+    val message: String? = null,
+)
 
 /**
- * Presentation data for the Today screen. Recovery is populated by the current API;
- * cycle and sleep values remain nullable until their API calls are wired in.
+ * Coroutines start on the main dispatcher so sync bookkeeping stays single-threaded; only
+ * repository calls move to [ioDispatcher].
  */
-internal data class TodayModel(
-    val recovery: RecoveryRecord? = null,
-    val strain: Double? = null,
-    val sleep: Double? = null,
-    val syncedAt: String,
-) {
-    val hasData: Boolean
-        get() = recovery != null || strain != null || sleep != null
-}
-
 internal class HomeViewModel(
-    private val tokenStore: WhoopCredentialStore,
-    private val api: WhoopRecoveryClient = WhoopApi(),
+    private val repository: WhoofRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val now: () -> String = { Instant.now().toString() },
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) : LightViewModel<Unit>() {
-    private val tokenCoordinator = WhoopTokenCoordinator(tokenStore, api)
-    private val _state = MutableStateFlow<HomeState>(HomeState.Starting)
-    val state: StateFlow<HomeState> = _state
-    @Volatile
-    private var hasCredentials = false
+    private val _state = MutableStateFlow(HomeUiState())
+    val state: StateFlow<HomeUiState> = _state
     private var initialized = false
-    @Volatile
-    private var refreshGeneration = 0L
-    private var refreshJob: Job? = null
+    private var syncJob: Job? = null
+    private var consecutiveFailures = 0
+    private var holdUntilMillis = 0L
 
     override fun onScreenShow(screen: SimpleLightScreen<Unit>) {
         super.onScreenShow(screen)
-        start()
+        if (initialized) syncIfStale() else start()
     }
 
     internal fun start() {
         if (initialized) return
         initialized = true
-        viewModelScope.launch(ioDispatcher) {
-            try {
-                hasCredentials = tokenStore.load() != null
+        viewModelScope.launch {
+            combine(repository.days, repository.lastSuccessfulSyncMillis) { days, lastSync -> days to lastSync }
+                .collect { (days, lastSync) ->
+                    _state.update { it.copy(days = days, lastSyncMillis = lastSync) }
+                }
+        }
+        viewModelScope.launch {
+            val connected = try {
+                withContext(ioDispatcher) { repository.hasCredentials() }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                _state.value = HomeState.ApiError("Unable to load stored credentials.", false)
+                _state.update { it.copy(connection = Connection.NotConnected, message = "Stored credentials could not be read.") }
                 return@launch
             }
-            if (!hasCredentials) {
-                _state.value = HomeState.NotConnected
-            } else {
-                refresh()
-            }
+            _state.update { it.copy(connection = if (connected) Connection.Connected else Connection.NotConnected) }
+            if (connected) sync()
         }
     }
 
     fun provision(payload: String) {
+        val credentials = runCatching { ProvisioningPayload.parse(payload) }.getOrElse {
+            _state.update { state -> state.copy(message = it.message ?: "Invalid provisioning QR code.") }
+            return
+        }
         viewModelScope.launch {
-            val credentials = runCatching { ProvisioningPayload.parse(payload) }
-                .getOrElse {
-                    _state.value = HomeState.ApiError(it.message ?: "Invalid provisioning QR code.", false)
-                    return@launch
-                }
-            _state.value = HomeState.Loading
+            stopSync()
             try {
-                withContext(ioDispatcher) { tokenStore.save(credentials) }
+                withContext(ioDispatcher) { repository.provision(credentials) }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                _state.value = HomeState.ApiError("Unable to store the access token securely.", false)
+                _state.update { it.copy(message = "Unable to store the access token securely.") }
                 return@launch
             }
-            hasCredentials = true
-            refresh()
+            resetBackoff()
+            _state.update { it.copy(connection = Connection.Connected, sync = SyncStatus.Idle, message = null) }
+            sync()
         }
     }
 
-    fun refresh() {
-        if (!hasCredentials) {
-            _state.value = HomeState.NotConnected
-            return
-        }
-        val generation = ++refreshGeneration
-        refreshJob?.cancel()
-        _state.value = HomeState.Loading
-        refreshJob = viewModelScope.launch(ioDispatcher) {
-            try {
-                val today = tokenCoordinator.execute { accessToken ->
-                    val recovery = api.latestRecovery(accessToken)
-                    val cycle = api.latestCycle(accessToken)
-                    val sleep = cycle?.let { api.sleepForCycle(accessToken, it.id) }
-                    TodayModel(
-                        recovery = recovery,
-                        strain = cycle?.score?.strain,
-                        sleep = sleep?.score?.sleepPerformancePercentage,
-                        syncedAt = now(),
-                    )
-                }
-                if (generation == refreshGeneration) {
-                    _state.value = if (!today.hasData) {
-                        HomeState.NoData
-                    } else {
-                        HomeState.Ready(today)
-                    }
-                }
-            } catch (error: WhoopApiException) {
-                if (generation == refreshGeneration) {
-                    _state.value = if (error.reason == WhoopApiError.Unauthorized) {
-                        HomeState.AuthorizationExpired
-                    } else {
-                        HomeState.ApiError(error.reason.userMessage(), true)
-                    }
-                }
-            } catch (_: WhoopReprovisioningException) {
-                if (generation == refreshGeneration) {
-                    _state.value = HomeState.AuthorizationExpired
-                }
+    /** Starts a sync unless one is already running. Explicit requests ignore failure backoff. */
+    fun sync() {
+        if (_state.value.connection != Connection.Connected) return
+        if (syncJob?.isActive == true) return
+        _state.update { it.copy(sync = SyncStatus.Syncing) }
+        syncJob = viewModelScope.launch {
+            val result = try {
+                withContext(ioDispatcher) { repository.sync() }
+                SyncStatus.Idle
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (error: Exception) {
-                if (generation == refreshGeneration) {
-                    _state.value = if (error.isOffline()) {
-                        HomeState.Offline
-                    } else {
-                        HomeState.ApiError("Unable to reach WHOOP.", true)
-                    }
+            } catch (_: WhoopReprovisioningException) {
+                SyncStatus.AuthorizationExpired
+            } catch (error: WhoopApiException) {
+                when (error.reason) {
+                    WhoopApiError.Unauthorized -> SyncStatus.AuthorizationExpired
+                    WhoopApiError.RateLimited -> SyncStatus.Failed(error.reason.userMessage(), rateLimited = true)
+                    else -> SyncStatus.Failed(error.reason.userMessage())
                 }
+            } catch (error: Exception) {
+                if (error.isOffline()) SyncStatus.Offline else SyncStatus.Failed("Unable to reach WHOOP.")
             }
+            recordOutcome(result)
+            _state.update { it.copy(sync = result) }
         }
+    }
+
+    /** Called when Today is shown again; respects the sync interval and failure backoff. */
+    internal fun syncIfStale() {
+        val state = _state.value
+        if (state.sync is SyncStatus.AuthorizationExpired) return
+        if (nowMillis() < holdUntilMillis) return
+        val lastSync = state.lastSyncMillis
+        if (lastSync == null || nowMillis() - lastSync >= AUTO_SYNC_INTERVAL_MILLIS) sync()
     }
 
     fun disconnect() {
-        ++refreshGeneration
-        refreshJob?.cancel()
-        hasCredentials = false
         viewModelScope.launch {
+            stopSync()
             try {
-                withContext(ioDispatcher) { tokenStore.clear() }
-                _state.value = HomeState.NotConnected
+                withContext(ioDispatcher) { repository.disconnect() }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                _state.value = HomeState.ApiError("Unable to clear stored credentials.", false)
+                _state.update { it.copy(message = "Unable to delete local data.") }
+                return@launch
             }
+            resetBackoff()
+            _state.update { it.copy(connection = Connection.NotConnected, sync = SyncStatus.Idle, message = null) }
         }
     }
 
-    override fun onCleared() {
-        api.close()
-        super.onCleared()
+    private suspend fun stopSync() {
+        syncJob?.cancelAndJoin()
+        syncJob = null
     }
 
+    private fun recordOutcome(result: SyncStatus) {
+        when (result) {
+            SyncStatus.Idle -> resetBackoff()
+            is SyncStatus.Failed, SyncStatus.Offline -> {
+                consecutiveFailures++
+                val backoff = if (result is SyncStatus.Failed && result.rateLimited) {
+                    RATE_LIMIT_HOLD_MILLIS
+                } else {
+                    failureBackoffMillis(consecutiveFailures)
+                }
+                holdUntilMillis = nowMillis() + backoff
+            }
+            SyncStatus.AuthorizationExpired, SyncStatus.Syncing -> Unit
+        }
+    }
+
+    private fun resetBackoff() {
+        consecutiveFailures = 0
+        holdUntilMillis = 0L
+    }
+}
+
+/** Doubles from the normal sync interval after each consecutive failure, up to one hour. */
+internal fun failureBackoffMillis(consecutiveFailures: Int): Long {
+    val doublings = (consecutiveFailures - 1).coerceIn(0, 10)
+    return (AUTO_SYNC_INTERVAL_MILLIS shl doublings).coerceAtMost(MAX_FAILURE_BACKOFF_MILLIS)
 }
 
 internal fun WhoopApiError.userMessage(): String = when (this) {
@@ -229,280 +256,322 @@ internal fun Exception.isOffline(): Boolean {
 internal class HomeScreen(
     sealedActivity: SealedLightActivity,
 ) : LightScreen<Unit, HomeViewModel>(sealedActivity) {
+    private val repository = DefaultWhoofRepository.getInstance(lightContext)
+
     override val viewModelClass: Class<HomeViewModel> = HomeViewModel::class.java
 
-    override fun createViewModel(): HomeViewModel = HomeViewModel(TokenStore(lightContext.dataStore))
+    override fun createViewModel(): HomeViewModel = HomeViewModel(repository)
+
+    private fun scanToken() {
+        navigateTo(::ProvisioningScreen) { viewModel.provision(it) }
+    }
+
+    private fun openSettings() {
+        navigateTo(::SettingsScreen) { action ->
+            when (action) {
+                SettingsAction.SyncNow -> viewModel.sync()
+                SettingsAction.ReplaceToken -> scanToken()
+                SettingsAction.Disconnect -> viewModel.disconnect()
+            }
+        }
+    }
+
+    private fun openHistory(metric: HistoryMetric) {
+        navigateTo({ MetricHistoryScreen(it, metric, repository) })
+    }
 
     @Composable
     override fun Content() {
         val state by viewModel.state.collectAsState()
-        val colors by LightThemeController.colors.collectAsState()
+        val days = state.days
+        val today = days?.firstOrNull()
 
-        LightTheme(colors = colors) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(LightThemeTokens.colors.background)
-                    .padding(horizontal = 24.dp, vertical = 28.dp),
-            ) {
-                LightText(text = "WHOOF", variant = LightTextVariant.Heading)
-                LightText(
-                    text = "WHOOP TODAY",
-                    variant = LightTextVariant.Superfine,
-                    lighten = true,
+        WhoofPage(
+            title = today?.date?.topBarText(),
+            rightButton = if (state.connection == Connection.Connected) {
+                LightBarButton.LightIcon(LightIcons.SETTINGS, onClick = ::openSettings, contentDescription = "Settings")
+            } else {
+                null
+            },
+        ) {
+            when {
+                state.connection == Connection.Starting -> Unit
+                state.connection == Connection.NotConnected -> NotConnected(state.message, ::scanToken)
+                days == null -> Unit
+                today == null -> EmptyToday(state.sync, ::scanToken, viewModel::sync)
+                else -> TodayContent(
+                    today = today,
+                    earlier = days.drop(1),
+                    syncing = state.sync == SyncStatus.Syncing,
+                    syncDetails = state.syncDetailsText(today),
+                    syncProblem = state.sync.problemText(),
+                    onSync = viewModel::sync,
+                    onReconnect = if (state.sync is SyncStatus.AuthorizationExpired) ::scanToken else null,
+                    onHistory = ::openHistory,
                 )
-                Divider(Modifier.padding(vertical = 22.dp))
-
-                when (val current = state) {
-                    HomeState.Starting -> Status("STARTING")
-                    HomeState.NotConnected -> NotConnected(
-                        onConnect = {
-                            navigateTo(::ProvisioningScreen) { viewModel.provision(it) }
-                        },
-                    )
-                    HomeState.Loading -> Status("LOADING", "FETCHING TODAY")
-                    HomeState.NoData -> NoDataContent(
-                        onRefresh = viewModel::refresh,
-                        onDisconnect = viewModel::disconnect,
-                    )
-                    HomeState.AuthorizationExpired -> AuthorizationExpiredContent(
-                        onReplaceToken = {
-                            navigateTo(::ProvisioningScreen) { viewModel.provision(it) }
-                        },
-                        onDisconnect = viewModel::disconnect,
-                    )
-                    HomeState.Offline -> OfflineContent(
-                        onRetry = viewModel::refresh,
-                        onDisconnect = viewModel::disconnect,
-                    )
-                    is HomeState.Ready -> RecoveryContent(
-                        today = current.today,
-                        onHistory = { navigateTo(::HistoryScreen) },
-                        onRefresh = viewModel::refresh,
-                        onDisconnect = viewModel::disconnect,
-                    )
-                    is HomeState.ApiError -> ApiErrorContent(
-                        message = current.message,
-                        connected = current.connected,
-                        onRetry = viewModel::refresh,
-                        onReplaceToken = {
-                            navigateTo(::ProvisioningScreen) { viewModel.provision(it) }
-                        },
-                        onDisconnect = viewModel::disconnect,
-                    )
-                }
             }
         }
     }
 }
 
 @Composable
-private fun ColumnScope.NoDataContent(
-    onRefresh: () -> Unit,
-    onDisconnect: () -> Unit,
+private fun ColumnScope.NotConnected(message: String?, onConnect: () -> Unit) {
+    CenteredMessage("CONNECT WHOOP", message ?: "Scan a provisioning QR code made on your computer.")
+    LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = onConnect)))
+}
+
+@Composable
+private fun ColumnScope.EmptyToday(sync: SyncStatus, onScan: () -> Unit, onRetry: () -> Unit) {
+    when (sync) {
+        SyncStatus.Syncing -> CenteredMessage("LOADING")
+        SyncStatus.Idle -> CenteredMessage("NO DATA", "WHOOP has no recent cycles for this account.")
+        SyncStatus.Offline -> {
+            CenteredMessage("OFFLINE", "WHOOP could not be reached.")
+            LightBottomBar(listOf(LightBarButton.Text(text = "RETRY", onClick = onRetry)))
+        }
+        SyncStatus.AuthorizationExpired -> {
+            CenteredMessage("RECONNECT WHOOP", "Authorization expired. Scan a new provisioning QR code.")
+            LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = onScan)))
+        }
+        is SyncStatus.Failed -> {
+            CenteredMessage("SYNC FAILED", sync.message)
+            LightBottomBar(listOf(LightBarButton.Text(text = "RETRY", onClick = onRetry)))
+        }
+    }
+}
+
+/** Shows WHOOP's record update time separately from Whoof's last successful sync. */
+private fun HomeUiState.syncDetailsText(today: DaySummary): String = listOfNotNull(
+    "UPDATED ${today.updatedMillis.syncTimeText()}",
+    lastSyncMillis?.let { "SYNCED ${it.syncTimeText()}" },
+).joinToString(" · ")
+
+/** Failures stay visible beneath the activities so stale data is never presented as current. */
+private fun SyncStatus.problemText(): String? = when (this) {
+    SyncStatus.Syncing, SyncStatus.Idle -> null
+    SyncStatus.Offline -> "OFFLINE"
+    SyncStatus.AuthorizationExpired -> "AUTHORIZATION EXPIRED"
+    is SyncStatus.Failed -> if (rateLimited) "RATE LIMITED" else "SYNC FAILED"
+}
+
+@Composable
+private fun ColumnScope.TodayContent(
+    today: DaySummary,
+    earlier: List<DaySummary>,
+    syncing: Boolean,
+    syncDetails: String,
+    syncProblem: String?,
+    onSync: () -> Unit,
+    onReconnect: (() -> Unit)?,
+    onHistory: (HistoryMetric) -> Unit,
 ) {
-    LightText(text = "NO DATA", variant = LightTextVariant.Subheading)
-    LightText(
-        text = "WHOOP returned no recovery, cycle, or sleep data.",
-        variant = LightTextVariant.Paragraph,
-        lighten = true,
-        modifier = Modifier.padding(top = 12.dp),
-    )
-    Spacer(Modifier.weight(1f))
-    Divider(Modifier.padding(vertical = 18.dp))
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Action("REFRESH", onRefresh)
-        Action("DISCONNECT", onDisconnect)
+    PullToSync(syncing = syncing, details = syncDetails, onSync = onSync) {
+        // Dials and vitals stay fixed; only the activity rows scroll.
+        Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 1f.gridUnitsAsDp())) {
+            Dials(today, onHistory)
+            Vitals(today, earlier, Modifier.padding(top = 1.2f.gridUnitsAsDp()))
+            SectionLabel("ACTIVITY", Modifier.padding(top = 1.4f.gridUnitsAsDp()))
+        }
+        LightScrollView(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 1f.gridUnitsAsDp()),
+        ) {
+            ActivityRows(today.activities, Modifier.padding(bottom = 1f.gridUnitsAsDp()))
+        }
+    }
+    syncProblem?.let {
+        LightText(
+            text = it,
+            variant = LightTextVariant.Superfine,
+            lighten = true,
+            align = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 0.6f.gridUnitsAsDp()),
+        )
+    }
+    onReconnect?.let {
+        LightBottomBar(listOf(LightBarButton.Text(text = "SCAN QR CODE", onClick = it)))
+    }
+}
+
+/**
+ * Dragging down on the page outside the activity list reveals sync details; releasing past the
+ * threshold starts a sync and holds the details open until it ends. The activity list consumes its
+ * own drags, so scrolling it never triggers a sync.
+ */
+@Composable
+private fun ColumnScope.PullToSync(
+    syncing: Boolean,
+    details: String,
+    onSync: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val thresholdPx = with(LocalDensity.current) { PULL_THRESHOLD_UNITS.gridUnitsAsDp().toPx() }
+    val pull = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var holding by remember { mutableStateOf(false) }
+    val currentSyncing by rememberUpdatedState(syncing)
+    val currentOnSync by rememberUpdatedState(onSync)
+
+    // Holds the details open for whichever sync is running, including one that was already in
+    // progress when the pull was released, then retracts once it ends. The new sync's state can
+    // arrive a frame after release, and a refused request never starts, hence the bounded wait.
+    LaunchedEffect(holding) {
+        if (!holding) return@LaunchedEffect
+        withTimeoutOrNull(SYNC_START_WAIT_MILLIS) { snapshotFlow { currentSyncing }.first { it } }
+        snapshotFlow { currentSyncing }.first { !it }
+        holding = false
+        scope.launch { pull.animateTo(0f) }
+    }
+
+    fun drag(delta: Float) {
+        val next = if (delta > 0) pull.value + delta * PULL_RESISTANCE else pull.value + delta
+        scope.launch { pull.snapTo(next.coerceIn(0f, thresholdPx * 1.5f)) }
+    }
+
+    fun release() {
+        if (pull.value >= thresholdPx && !holding) {
+            if (!currentSyncing) currentOnSync()
+            holding = true
+        }
+        scope.launch { pull.animateTo(if (holding) thresholdPx else 0f) }
+    }
+
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .fillMaxWidth()
+            .draggable(
+                state = rememberDraggableState { drag(it) },
+                orientation = Orientation.Vertical,
+                onDragStopped = { release() },
+            ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(with(LocalDensity.current) { pull.value.toDp() })
+                .clipToBounds(),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(bottom = 0.4f.gridUnitsAsDp()),
+            ) {
+                LightText(
+                    text = when {
+                        holding -> "SYNCING"
+                        pull.value >= thresholdPx -> "RELEASE TO SYNC"
+                        else -> "PULL TO SYNC"
+                    },
+                    variant = LightTextVariant.Superfine,
+                )
+                LightText(text = details, variant = LightTextVariant.Superfine, lighten = true)
+            }
+        }
+        content()
     }
 }
 
 @Composable
-private fun ColumnScope.AuthorizationExpiredContent(
-    onReplaceToken: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    LightText(text = "AUTHORIZATION EXPIRED", variant = LightTextVariant.Subheading)
-    LightText(
-        text = "Scan a new QR code to reconnect Whoof to WHOOP.",
-        variant = LightTextVariant.Paragraph,
-        lighten = true,
-        modifier = Modifier.padding(top = 12.dp),
-    )
-    Spacer(Modifier.weight(1f))
-    Divider(Modifier.padding(vertical = 18.dp))
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Action("SCAN TOKEN", onReplaceToken)
-        Action("DISCONNECT", onDisconnect)
-    }
-}
-
-@Composable
-private fun ColumnScope.OfflineContent(
-    onRetry: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    LightText(text = "OFFLINE", variant = LightTextVariant.Subheading)
-    LightText(
-        text = "WHOOP could not be reached. Check the connection and try again.",
-        variant = LightTextVariant.Paragraph,
-        lighten = true,
-        modifier = Modifier.padding(top = 12.dp),
-    )
-    Spacer(Modifier.weight(1f))
-    Divider(Modifier.padding(vertical = 18.dp))
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Action("RETRY", onRetry)
-        Action("DISCONNECT", onDisconnect)
-    }
-}
-
-@Composable
-private fun NotConnected(onConnect: () -> Unit) {
-    LightText(text = "NO TOKEN", variant = LightTextVariant.Subheading)
-    LightText(
-        text = "Scan a locally generated provisioning QR code.",
-        variant = LightTextVariant.Paragraph,
-        lighten = true,
-        modifier = Modifier.padding(top = 12.dp),
-    )
-    Action("SCAN TOKEN", onConnect, Modifier.padding(top = 32.dp))
-}
-
-@Composable
-private fun ColumnScope.RecoveryContent(
-    today: TodayModel,
-    onHistory: () -> Unit,
-    onRefresh: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
+private fun Dials(today: DaySummary, onHistory: (HistoryMetric) -> Unit) {
     val recovery = today.recovery
-    TodayMetricRow(
-        TodayMetric(
-            label = "RECOVERY",
-            value = recovery?.score?.recoveryScore?.wholePercent()
-                ?: recovery?.scoreState?.scoreStateValue()
-                ?: "--",
-        ),
-        TodayMetric("STRAIN", today.strain.strainValue()),
-        TodayMetric("SLEEP", today.sleep.sleepValue()),
-    )
-    Divider(Modifier.padding(vertical = 18.dp))
-    TodayMetricRow(
-        TodayMetric("RHR", recovery?.score?.restingHeartRate.metricValue("bpm")),
-        TodayMetric("HRV", recovery?.score?.hrvRmssdMilli.metricValue("ms")),
-        TodayMetric("LAST SYNC", today.syncedAt.syncValue()),
-    )
-
-    Spacer(Modifier.weight(1f))
-    Divider(Modifier.padding(vertical = 18.dp))
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Action("HISTORY", onHistory)
-        Action("REFRESH", onRefresh)
-        Action("DISCONNECT", onDisconnect)
-    }
-}
-
-private fun Double?.metricValue(unit: String): String =
-    this?.let { "${it.toInt()} $unit" } ?: "--"
-
-private fun Double?.strainValue(): String = this?.let { String.format(Locale.US, "%.1f", it) } ?: "--"
-
-private fun Double?.sleepValue(): String = this?.let { "${it.toInt()}%" } ?: "--"
-
-private fun String.syncValue(): String = runCatching {
-    SYNC_TIME_FORMAT.format(Instant.parse(this).atZone(ZoneId.systemDefault()))
-}.getOrDefault("--")
-
-private fun String.scoreStateValue(): String = when (this) {
-    "PENDING_SCORE" -> "PENDING"
-    "UNSCORABLE" -> "--"
-    else -> this
-}
-
-private val SYNC_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-
-private data class TodayMetric(
-    val label: String,
-    val value: String,
-)
-
-@Composable
-private fun TodayMetricRow(
-    first: TodayMetric,
-    second: TodayMetric,
-    third: TodayMetric,
-) {
+    val sleep = today.sleep
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(0.8f.gridUnitsAsDp()),
     ) {
-        TodayMetricContent(first, Alignment.Start)
-        TodayMetricContent(second, Alignment.CenterHorizontally)
-        TodayMetricContent(third, Alignment.End)
+        Dial(
+            value = recovery?.score.percentText(recovery?.state),
+            label = "RECOVERY",
+            fraction = recovery?.score?.let { (it / 100).toFloat() },
+            color = recovery?.score?.let { recoveryZone(it).color() } ?: WhoofColors.RecoveryGreen,
+            onClick = { onHistory(HistoryMetric.Recovery) },
+            modifier = Modifier.weight(1f),
+        )
+        Dial(
+            value = today.strain.strainText(today.cycleState),
+            label = "STRAIN",
+            fraction = today.strain?.let { (it / MAX_STRAIN).toFloat() },
+            color = WhoofColors.Strain,
+            onClick = { onHistory(HistoryMetric.Strain) },
+            modifier = Modifier.weight(1f),
+        )
+        Dial(
+            value = sleep?.performancePercentage.percentText(sleep?.state),
+            label = "SLEEP",
+            fraction = sleep?.performancePercentage?.let { (it / 100).toFloat() },
+            color = WhoofColors.Sleep,
+            onClick = { onHistory(HistoryMetric.Sleep) },
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
 @Composable
-private fun RowScope.TodayMetricContent(
-    metric: TodayMetric,
-    alignment: Alignment.Horizontal,
+private fun Vitals(today: DaySummary, earlier: List<DaySummary>, modifier: Modifier) {
+    val hrv = today.recovery?.hrvMilli
+    val rhr = today.recovery?.restingHeartRate
+    Row(modifier = modifier.fillMaxWidth()) {
+        Vital(
+            value = hrv?.let { "${it.toInt()}" } ?: "--",
+            unit = "MS",
+            label = "HRV",
+            trend = trend(hrv, earlier.map { it.recovery?.hrvMilli }),
+            higherIsBetter = true,
+            modifier = Modifier.weight(1f),
+        )
+        Vital(
+            value = rhr?.let { "${it.toInt()}" } ?: "--",
+            unit = "BPM",
+            label = "RHR",
+            trend = trend(rhr, earlier.map { it.recovery?.restingHeartRate }),
+            higherIsBetter = false,
+            modifier = Modifier.weight(1f),
+        )
+        Vital(
+            value = today.sleep?.asleepMilli?.hoursMinutesText() ?: "--",
+            unit = null,
+            label = "ASLEEP",
+            trend = null,
+            higherIsBetter = true,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun Vital(
+    value: String,
+    unit: String?,
+    label: String,
+    trend: Trend?,
+    higherIsBetter: Boolean,
+    modifier: Modifier,
 ) {
-    Column(
-        modifier = Modifier.weight(1f),
-        horizontalAlignment = alignment,
-    ) {
-        LightText(text = metric.label, variant = LightTextVariant.Superfine, lighten = true)
-        LightText(text = metric.value, variant = LightTextVariant.Subheading)
-    }
-}
-
-@Composable
-private fun ColumnScope.ApiErrorContent(
-    message: String,
-    connected: Boolean,
-    onRetry: () -> Unit,
-    onReplaceToken: () -> Unit,
-    onDisconnect: () -> Unit,
-) {
-    LightText(
-        text = if (connected) "API ERROR" else "ERROR",
-        variant = LightTextVariant.Subheading,
-    )
-    LightText(
-        text = message,
-        variant = LightTextVariant.Paragraph,
-        lighten = true,
-        modifier = Modifier.padding(top = 12.dp),
-    )
-    Spacer(Modifier.weight(1f))
-    Divider(Modifier.padding(vertical = 18.dp))
-    if (connected) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Action("RETRY", onRetry)
-            Action("DISCONNECT", onDisconnect)
-        }
-        Action("REPLACE TOKEN", onReplaceToken, Modifier.padding(top = 20.dp))
-    } else {
-        Action("SCAN TOKEN", onReplaceToken)
-    }
-}
-
-@Composable
-private fun ColumnScope.Status(text: String, detail: String? = null) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .weight(1f),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LightText(text = text, variant = LightTextVariant.Subheading, lighten = true)
-            detail?.let {
+    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            LightText(text = value, variant = LightTextVariant.Subheading)
+            unit?.let {
                 LightText(
-                    text = it,
-                    variant = LightTextVariant.Micro,
+                    text = " $it",
+                    variant = LightTextVariant.Superfine,
                     lighten = true,
-                    modifier = Modifier.padding(top = 10.dp),
+                    modifier = Modifier.padding(bottom = 0.15f.gridUnitsAsDp()),
+                )
+            }
+        }
+        Row {
+            SectionLabel(label)
+            trend?.takeIf { it != Trend.Flat }?.let {
+                val improving = (it == Trend.Up) == higherIsBetter
+                LightText(
+                    text = if (it == Trend.Up) " ▲" else " ▼",
+                    variant = LightTextVariant.Superfine,
+                    color = if (improving) WhoofColors.RecoveryGreen else WhoofColors.RecoveryRed,
                 )
             }
         }
@@ -510,30 +579,26 @@ private fun ColumnScope.Status(text: String, detail: String? = null) {
 }
 
 @Composable
-private fun Metric(label: String, value: String, alignment: Alignment.Horizontal = Alignment.Start) {
-    Column(horizontalAlignment = alignment) {
-        LightText(text = label, variant = LightTextVariant.Superfine, lighten = true)
-        LightText(text = value, variant = LightTextVariant.Subheading)
+internal fun Activities(activities: List<ActivitySummary>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        SectionLabel("ACTIVITY")
+        ActivityRows(activities)
     }
 }
 
 @Composable
-private fun Action(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    LightText(
-        text = text,
-        variant = LightTextVariant.Button,
-        modifier = modifier
-            .lightClickable(onClick = onClick)
-            .padding(vertical = 8.dp),
-    )
-}
-
-@Composable
-private fun Divider(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(LightThemeTokens.colors.contentSecondary),
-    )
+private fun ActivityRows(activities: List<ActivitySummary>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        if (activities.isEmpty()) {
+            LightText(
+                text = "No activities recorded",
+                variant = LightTextVariant.Paragraph,
+                lighten = true,
+                modifier = Modifier.padding(top = 0.4f.gridUnitsAsDp()),
+            )
+        }
+        activities.forEach {
+            ActivityRow(it, Modifier.padding(top = 0.6f.gridUnitsAsDp()))
+        }
+    }
 }

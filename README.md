@@ -6,13 +6,17 @@ The official WHOOP app on another phone remains responsible for pairing with the
 
 Whoof is not affiliated with or endorsed by WHOOP or Light. It is a general-wellness tool, not a medical device, and must not be used to make medical decisions.
 
-See the [privacy policy](PRIVACY.md) for the data processed by the current proof of concept.
+See the [privacy policy](PRIVACY.md) for the data Whoof processes and stores.
 
 ## Status
 
-Whoof currently contains a minimal proof of concept. The Light SDK tool accepts a locally generated v2 provisioning QR code, stores the WHOOP OAuth credentials encrypted on-device, calls the WHOOP Developer API, and displays the latest recovery record.
+Whoof is an early, developer-oriented build. The Light SDK tool accepts a locally generated v2 provisioning QR code, stores the WHOOP OAuth credentials encrypted on-device, synchronizes the last 14 days of recovery, cycle, sleep, and workout records into a local Room cache, and keeps the last 30 days for offline viewing.
 
-OAuth authorization remains on the developer's local computer rather than inside the Light Phone app. Serialized on-device refresh-token rotation is implemented and unit-tested, but still requires live device validation. Background synchronization is not yet implemented.
+The Today screen shows recovery, strain, and sleep dials, HRV and resting heart rate with a trend against the previous seven days, time asleep, and the day's WHOOP activities with heart-rate zone bars. Only the activity list scrolls. Each dial opens a history screen for that metric; a day in strain history opens that day's activities, and tapping a day in sleep history expands its stage breakdown, sleep need, and respiratory rate. Pulling down on Today starts a sync and reveals WHOOP's latest record update separately from Whoof's last successful sync; sync failures stay visible beneath the activities. Settings provides manual sync, token replacement (which clears the previous cache), and a confirmed disconnection that deletes local data.
+
+OAuth authorization remains on the developer's local computer rather than inside the Light Phone app. Serialized on-device refresh-token rotation is implemented and unit-tested, but still requires live device validation. Whoof synchronizes when it opens and when Today is shown again after five minutes. After a failed sync, automatic retries back off from five minutes to one hour, and a WHOOP rate-limit response holds automatic sync for 30 minutes; Sync now in Settings always tries immediately. Periodic background synchronization is not yet implemented.
+
+Whoof cannot start, stop, or log activities. The WHOOP Developer API is read-only, so activities come from the official WHOOP app or WHOOP's automatic detection.
 
 The initial architecture is deliberately constrained to capabilities available in the Light SDK so that the project can be considered for Light's community-tool build and submission process.
 
@@ -20,10 +24,11 @@ The initial architecture is deliberately constrained to capabilities available i
 
 ### Initial scope
 
-- POC: show the latest WHOOP recovery record
-- Planned: show day strain, sleep, and workout data
-- Planned: cache records for offline viewing and refresh through Light SDK background work
-- Planned: allow the user to disconnect and delete local data
+- Show recovery, day strain, sleep, and the day's workouts
+- Show per-metric history for recovery, strain, and sleep
+- Cache records for offline viewing
+- Planned: refresh through Light SDK background work
+- Allow the user to disconnect and delete local data; WHOOP-side access revocation is not yet implemented
 
 ### Operating model
 
@@ -178,9 +183,12 @@ This checklist is the source of truth for implementation progress. Update it whe
 - [ ] Validate a live WHOOP token rotation on-device after the provisioned access token expires
 - [x] Add explicit loading, authorization-expired, no-data, offline, and API-error states
 - [x] Build and validate the Today screen for recovery, strain, sleep, RHR, HRV, and last-sync time
-- [ ] Add recent sleep, cycle, recovery, and workout history (in progress)
-- [ ] Add Room caching, manual refresh, and periodic synchronization
-- [ ] Add disconnect, access revocation, and complete local-data deletion
+- [x] Redesign Today with dials, vitals trends, a scrolling activity log, and pull-to-sync (validated by hand on the LP3; screenshots not yet captured)
+- [x] Add per-metric recovery, strain, and sleep history with expandable sleep rows and a day activity screen (validated by hand on the LP3; screenshots not yet captured)
+- [x] Add Room caching and manual refresh (unit-tested; cached display and pull-to-sync validated on the LP3)
+- [ ] Add periodic synchronization through a unique `LightWork` schedule
+- [ ] Add disconnect with complete local-data deletion of credentials, cached records, and sync metadata (implemented and unit-tested; awaiting on-device validation)
+- [ ] Add WHOOP access revocation from the application
 - [ ] Test offline behavior, token expiry, interrupted refresh, token rotation, and API rate limiting
 - [ ] Verify the controlled Light builder and prepare submission documentation
 
@@ -190,6 +198,14 @@ This checklist is the source of truth for implementation progress. Update it whe
 - What API update latency should users expect after the official app synchronizes a strap?
 - Which privacy and review documents will Light require for a tool displaying health data?
 - Should the setup helper support only macOS initially, or be cross-platform from its first release?
+- Do the WHOOP-style data colours (especially yellow recovery and pale REM) keep enough contrast on the LP3 display and in the LightOS light theme?
+
+## Known issues
+
+- History covers the last 14 days fetched on each sync (up to four pages of 25 records per collection) and keeps 30 days locally. Older records are not backfilled.
+- Recoveries are fetched as a single page of 25 and are upserted rather than window-replaced, so a recovery deleted in WHOOP stays cached until its cycle leaves the cache. Cycles, sleeps, and workouts deleted in WHOOP are removed from the window each sync covers.
+- WHOOP's API returns sleep-stage totals, not a timeline, and day totals rather than heart-rate time series, so Whoof cannot draw a hypnogram or an intraday heart-rate chart.
+- A day's calendar date is the wake date of its main sleep, or the cycle start shifted by 12 hours when there is no sleep record.
 
 ## References
 

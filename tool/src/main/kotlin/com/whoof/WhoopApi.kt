@@ -207,16 +207,6 @@ internal interface WhoopTokenRefresher {
     suspend fun refresh(credentials: WhoopCredentials): WhoopTokenRefreshResponse
 }
 
-internal interface WhoopRecoveryClient : WhoopTokenRefresher {
-    suspend fun latestRecovery(accessToken: String): RecoveryRecord?
-
-    suspend fun latestCycle(accessToken: String): CycleRecord?
-
-    suspend fun sleepForCycle(accessToken: String, cycleId: Long): SleepRecord?
-
-    fun close()
-}
-
 internal interface WhoopHistoryClient : WhoopTokenRefresher {
     suspend fun recentRecoveries(
         accessToken: String,
@@ -245,19 +235,11 @@ internal interface WhoopHistoryClient : WhoopTokenRefresher {
     fun close() = Unit
 }
 
-internal class WhoopApi : WhoopRecoveryClient, WhoopHistoryClient {
+internal class WhoopApi : WhoopHistoryClient {
     private val client = HttpClient(OkHttp) {
         install(ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
-    }
-
-    override suspend fun latestRecovery(accessToken: String): RecoveryRecord? {
-        return recentRecoveries(accessToken, limit = 1).records.firstOrNull()
-    }
-
-    override suspend fun latestCycle(accessToken: String): CycleRecord? {
-        return recentCycles(accessToken, limit = 1).records.firstOrNull()
     }
 
     override suspend fun recentRecoveries(
@@ -295,15 +277,6 @@ internal class WhoopApi : WhoopRecoveryClient, WhoopHistoryClient {
             parameter("limit", boundedRecentLimit(limit))
             nextToken?.let { parameter("nextToken", it) }
         }
-        validate(response)
-        return response.body()
-    }
-
-    override suspend fun sleepForCycle(accessToken: String, cycleId: Long): SleepRecord? {
-        val response = client.get("$CYCLE_URL/$cycleId/sleep") {
-            header(HttpHeaders.Authorization, "Bearer $accessToken")
-        }
-        if (response.status == HttpStatusCode.NotFound) return null
         validate(response)
         return response.body()
     }
