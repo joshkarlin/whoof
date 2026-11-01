@@ -1,11 +1,13 @@
 # Whoof Agent Guide
 
-Whoof is an unofficial, read-only WHOOP companion for the Light Phone III. It is a developer-oriented community tool, not a consumer product. Read `README.md` before proposing or implementing architectural changes.
+Whoof is an unofficial WHOOP companion for the Light Phone III. It is a developer-oriented community tool, not a consumer product. Read `README.md` before proposing or implementing architectural changes.
 
 ## Product contract
 
 - The official WHOOP app on another device remains the primary strap client.
 - Use WHOOP's documented Developer API for canonical recovery, sleep, cycle, and workout data.
+- User-authorized private-API work is isolated to `setup/` and the Android `com.whoof.privateapi` package. Its account session is separate from developer OAuth. Activity writes require a user-selected real session and explicit submission; login, provisioning, and connection checks must never create activities. Do not expand this exception to other endpoints without a concrete request.
+- Keep private transport, provisioning, persistence, and submission lifecycle code in `tool/src/main/kotlin/com/whoof/privateapi/`; see `docs/private-api-app.md` for the UI integration contract. Coordinate ownership before editing another agent's screens. Never retry an activity POST automatically, including after refresh, timeout, cancellation, or process restart.
 - Each user owns and provisions their own WHOOP Developer credentials.
 - Do not add a shared backend, credential broker, telemetry service, webhook receiver, or data relay without explicit user approval.
 - Do not add direct WHOOP Bluetooth support to the initial application. Treat it as a separate future research track.
@@ -34,16 +36,16 @@ docs/   Architecture, privacy, setup, and submission documents
 ```
 
 - Keep the setup helper independent from the Android APK and Light builder.
-- The setup helper may perform OAuth locally and generate a one-time provisioning QR code. It must not transmit credentials anywhere except WHOOP's documented endpoints.
+- The setup helper may perform OAuth locally and generate a one-time provisioning QR code. Transmit credentials only to WHOOP's documented endpoints or the narrowly scoped experimental private-API endpoints authorized above.
 - Keep WHOOP transport models separate from persisted entities and UI models.
 - Cache API records in Room so the application remains useful offline.
-- Use DataStore only for nonsensitive preferences and synchronization metadata.
+- Use DataStore only for nonsensitive preferences, synchronization metadata, or authenticated-encrypted credential/submission blobs. Never store plaintext account sessions or activity drafts there.
 - Use Android Keystore with authenticated encryption for client secrets and OAuth tokens.
 - Centralize API endpoint construction, OAuth behavior, retry policy, and redaction.
 
 ## OAuth invariants
 
-WHOOP refresh tokens rotate. A successful refresh invalidates the previous access and refresh tokens.
+WHOOP Developer OAuth refresh tokens rotate. A successful refresh invalidates the previous access and refresh tokens. These invariants govern the existing developer OAuth integration; the experimental account session uses a separate Cognito refresh flow, which normally retains its refresh token and has a fixed session lifetime.
 
 - Allow exactly one refresh operation at a time within the process.
 - Route foreground and background API calls through the same token coordinator.
@@ -57,7 +59,8 @@ WHOOP refresh tokens rotate. A successful refresh invalidates the previous acces
 
 - Health records and OAuth credentials are sensitive data.
 - Request only scopes used by implemented product behavior. New scopes require an explicit README update and review.
-- Use documented WHOOP HTTPS endpoints only.
+- Use documented WHOOP HTTPS endpoints except for the explicitly authorized private-API work.
+- The experimental private-API helper and Android package may call the researched WHOOP authentication, account-read, and activity-creation endpoints. Keep destinations fixed, credentials out of output, and activity submissions free of automatic retries. The additional private detail-read probes remain local research until explicitly integrated.
 - Redact authorization headers, query parameters, tokens, secrets, email addresses, user IDs, and health values from logs and exceptions.
 - Use synthetic or irreversibly redacted API fixtures in tests.
 - Provide complete local-data deletion and WHOOP access revocation.

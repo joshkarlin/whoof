@@ -1,6 +1,6 @@
 # Whoof
 
-Whoof is an unofficial, read-only WHOOP companion for the Light Phone III. It is intended for its developers and other technically capable users, rather than as a consumer product.
+Whoof is an unofficial WHOOP companion for the Light Phone III. It is intended for its developers and other technically capable users, rather than as a consumer product.
 
 The official WHOOP app on another phone remains responsible for pairing with the strap, synchronizing sensor data, updating firmware, and sending data to WHOOP. Whoof reads the resulting recovery, sleep, strain, and workout data through the official WHOOP Developer API and presents a focused Light Phone interface.
 
@@ -30,7 +30,7 @@ The initial architecture is deliberately constrained to capabilities available i
 - The WHOOP strap remains paired with the official WHOOP app on another device
 - Each Whoof user creates and owns a WHOOP Developer application
 - OAuth credentials are supplied at runtime and are never built into Whoof
-- Whoof communicates directly with WHOOP's official API
+- Whoof communicates directly with WHOOP; the documented Developer API remains the normal read path, with a separate experimental private path for activity creation
 - Whoof has no developer-operated backend, account system, telemetry, or data relay
 
 ### Non-goals for the initial version
@@ -157,7 +157,7 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 - Request only the read-only OAuth scopes committed to the roadmap; exclude profile and body-measurement access unless a concrete feature later requires them
 - Store health data only on the Light Phone
 - Encrypt OAuth credentials at rest with a non-exportable Keystore key
-- Use TLS exclusively and communicate only with documented WHOOP endpoints
+- Use TLS exclusively; use documented WHOOP endpoints except for the explicitly scoped experimental private integration
 - Provide explicit API revocation and complete local-data deletion
 - Collect no analytics, telemetry, crash reports, or user identifiers
 - Treat API payloads, database exports, screenshots, and logs as sensitive health data
@@ -165,6 +165,18 @@ Passing the SDK builder does not guarantee that Light will classify Whoof as a L
 ## Roadmap
 
 This checklist is the source of truth for implementation progress. Update it when work starts, completes, or changes scope.
+
+Experimental private-API work includes the local setup helper and a separate Android backend package, currently being prepared for UI integration. Existing screens continue to use the official Developer API. See [the private-API proof of concept](docs/private-api-poc.md) and [Android integration contract](docs/private-api-app.md). Private account credentials are separate from Developer OAuth and grant broader account access.
+
+- [x] Build and unit-test private-API login, session refresh, and a read-only account check
+- [x] Build and unit-test a local activity preview and explicitly confirmed submission command
+- [x] Add and test macOS clipboard import to avoid terminal paste limits, with visible account-check progress
+- [x] Validate private-API login against the user's account through macOS browser-session clipboard import (direct password sign-in still returns 401)
+- [x] Submit one user-selected real activity and verify its type, time window, and SCORED status through the WHOOP API
+- [x] Validate read-only private workout detail, sleep need, strain target, and detailed sleep endpoints ([results and schema notes](docs/private-api-read-tests.md))
+- [x] Implement and unit-test the isolated Android private login/session provisioning, encrypted storage codec, and explicitly confirmed activity backend (46 tests pass in an isolated JVM harness; not device validation)
+- [ ] Verify the full Android build with the private backend (blocked fetching Light keyboard `0.0.16`; GitHub Packages returns 401)
+- [ ] Integrate private connection and activity controls into the UI, then validate login and one user-selected submission on the Light Phone
 
 - [x] Implement the POC access-token provisioning bundle and recovery API call
 - [x] Complete live local OAuth token exchange and QR provisioning

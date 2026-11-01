@@ -1,0 +1,75 @@
+# Android private API integration
+
+## Ownership
+
+The Android backend lives exclusively in `tool/src/main/kotlin/com/whoof/privateapi/`, with tests in the matching test package. Existing public-API files and UI screens are not changed by this work. Keep UI/navigation changes with the UI owner; do not duplicate private HTTP or token logic in screens.
+
+| File | Responsibility |
+| --- | --- |
+| `WhoopPrivateClient.kt` | Fixed WHOOP endpoints, password/MFA authentication, account-session refresh, account check, one-shot activity POST |
+| `PrivateWhoopModels.kt` | Separate account credentials, safe error categories, sports, draft and wire payload |
+| `PrivateWhoopProvisioning.kt` | Strict, versioned private-session QR parser, distinct from Developer OAuth |
+| `PrivateWhoopStore.kt` | Encrypted session and single draft/submission record |
+| `WhoopPrivateService.kt` | Screen-facing operations, serialized session handling, durable no-replay activity lifecycle |
+
+Use one shared service across the private screens:
+
+```kotlin
+val client = WhoopPrivateClient()
+val store = EncryptedPrivateWhoopStore(lightContext.dataStore)
+val service = WhoopPrivateService(store, client)
+```
+
+Create this in an appropriate application/screen-owner lifecycle, not on every recomposition. Reuse the existing SDK DataStore instance. Close the HTTP client only when its shared owner is finished. A process-wide service mutex also guards accidental duplicate service instances; this does not establish cross-process coordination.
+
+## Connection
+
+The proven live-account route is browser-session import. Direct password authentication returned HTTP 401 during local research even though browser login succeeded. The Android password/MFA code is experimental; do not present a 401 as proof that the user's password is incorrect.
+
+Generate a private QR from the existing local account session:
+
+```sh
+uv run --frozen python setup/provision_private_session.py
+```
+
+The helper validates the account and writes `local/private-api/whoof-private-provision.png`. It may refresh an expired local session. `--overwrite` is required to replace an existing image. Scan locally and delete the image after connection; never upload it or use an online QR generator.
+
+The exact URI is `whoof://private-provision` with fields `v=1`, `access_token`, `refresh_token`, and `expires_at` (absolute Unix seconds). The parser rejects public OAuth QRs, extra/duplicate fields, oversized tokens/payloads, and expiry within 60 seconds. The phone verifies the session against WHOOP before saving it. Decoding a QR alone does not establish that a session is genuine.
+
+Screen-facing calls:
+
+- `provision(scannedText)` verifies and saves a private session.
+- `beginLogin(email, password)` returns `Authenticated` or `VerificationRequired`.
+- `completeLogin(challenge, code)` handles the supported verification challenge. Keep challenge and password only in memory; clear UI inputs after use and never log them.
+- `checkConnection()` refreshes when needed and checks authenticated account access without returning personal account details.
+- `state()` loads the private session and draft. Treat all fields as sensitive; do not dump them into logs or saved screen state.
+- `disconnect()` removes private credentials and prepared drafts, retaining any attempted-submission marker to prevent silent replay. It does not affect Developer OAuth or revoke the server session.
+- `deleteLocalData(confirmed = true)` explicitly deletes the private session and draft/receipt marker. This is local deletion, not server revocation or deletion of a WHOOP activity. Warn before deleting an uncertain marker.
+
+Private credentials use a separate encrypted DataStore preference record. Encryption reuses the existing Keystore-backed AES-GCM cipher/key, not the public OAuth token coordinator or credential model. No passwords or MFA challenges are persisted. Account refresh is separate from rotating Developer OAuth; a missing refresh-token replacement retains the current Cognito refresh token.
+
+## Activity flow
+
+This creates a completed activity record, not a live band session or a Bluetooth command. It neither pairs with nor synchronizes the strap. The official WHOOP app still uploads sensor data.
+
+1. Select `PrivateWhoopSport` and a real, completed start/end window. Supported initial sports: running, cycling, weightlifting, hiking, walking. Resolve local clock times and DST ambiguity into explicit `Instant` values in the UI before calling the service.
+2. Call `prepareActivity(sport, start, end, ZoneId)`. The initial limit is one minute to 24 hours, ending no later than now; GPS is disabled. Preparing only saves a local draft.
+3. Show the saved sport, start/end in the saved timezone, and duration for review. Submit only after an explicit user action with `submitActivity(draft.id, confirmed = true)`; never submit in initialization, a state collector, or navigation callbacks.
+4. On success, the saved status is `Submitted` with an activity receipt. Receipt acceptance is not proof that scoring is finished or that all metrics exist.
+5. On an uncertain outcome, keep the saved `Uncertain` marker and tell the user to check WHOOP before creating another draft. `discardDraft(confirmed = true)` is a separate deliberate action, not an automatic error recovery path.
+
+The service persists `Uncertain` **before** the POST. Timeout, cancellation, process death, invalid receipt, or failure to persist an accepted receipt cannot turn that draft back into `Prepared`. A known rejection is stored as `Rejected`; the same draft is still not replayed. Double taps and a second service instance cannot submit the same draft twice within the process. This is conservative local duplicate prevention, not server idempotency: manually discarding records or reinstalling the app removes that protection.
+
+An expired session is refreshed and saved before submission. An unauthorized account GET can refresh and retry once; an activity POST never triggers refresh/replay. Redirects and connection retries are disabled in the private HTTP client. No background activity submissions are scheduled.
+
+## UI states and limits
+
+Map `PrivateWhoopException.reason` to fixed, concise messages. Handle `ReconnectRequired`, `RateLimited`, `ConfirmationRequired`, `AlreadyAttempted`, and `SubmissionUncertain` distinctly. Never display raw HTTP bodies, exception causes, credentials, or personal health JSON. Cancellation should cancel the screen operation, not become an automatic resubmit.
+
+UI wiring, real-phone scanning, device persistence/refresh, and one explicitly selected live activity submission require separate verification. Local JVM tests do not prove those work on hardware. This package does not integrate private sleep/strain/detail endpoints or journal/alarms. No controlled-builder or Light-approval claim is implied by adding the backend.
+
+## Verification
+
+- 46 Kotlin tests passed against the production backend source in an isolated temporary JVM harness, including a loopback HTTP 503/`Retry-After: 0` no-replay check. The harness used the pinned Kotlin/Ktor/coroutine/serialization/DataStore versions and an Android compile-only jar; it excluded UI and does not establish APK or Keystore behavior on hardware.
+- 83 Python setup tests passed offline, including nine new private QR-export tests. No live export or account write was performed during this implementation.
+- Full `:tool:testDebugUnitTest` is blocked before compilation: `com.thelightphone.lp3keyboard:ui:0.0.16` is not cached and GitHub Packages returns HTTP 401 with the available login. No dependencies, SDK source, or UI files were changed to bypass this blocker.

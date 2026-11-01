@@ -56,3 +56,4 @@ replay_pid*.log
 ### Local Whoof setup ###
 /.venv/
 /whoof-provision.png
+/pw
