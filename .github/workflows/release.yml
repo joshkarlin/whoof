@@ -1,0 +1,82 @@
+name: Release
+
+# Push a tag like v0.2.0 or v0.2.0-rc.1 to build the APK and publish a GitHub
+# Release. Obtainium watches this repo's releases and picks up the attached APK.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"          # 0.2.0  or  0.2.0-rc.1
+          BASE="${TAG%%-*}"                    # 0.2.0
+          PRE="${TAG#"$BASE"}"                 # ""  or  -rc.1
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
+          BASECODE=$(( ${MAJOR:-0} * 10000 + ${MINOR:-0} * 100 + ${PATCH:-0} ))
+          if [ -z "$PRE" ]; then
+            # Final release sorts above all prereleases of the same base.
+            CODE=$(( BASECODE * 1000 + 999 ))
+            PRERELEASE=false
+          else
+            NUM="${PRE##*.}"                   # rc.1 -> 1
+            case "$NUM" in ""|*[!0-9]*) NUM=1 ;; esac
+            CODE=$(( BASECODE * 1000 + NUM ))
+            PRERELEASE=true
+          fi
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "Version $TAG -> versionCode $CODE (prerelease=$PRERELEASE)"
+
+      # lighttool.toml is the version source, and the SDK only accepts major.minor.patch,
+      # so an rc shows its base version on the phone; the release and APK keep the full tag.
+      - name: Stamp version into lighttool.toml
+        run: |
+          sed -i -E \
+            -e 's/^versionCode = .*/versionCode = ${{ steps.ver.outputs.code }}/' \
+            -e 's/^versionName = .*/versionName = "${{ steps.ver.outputs.base }}"/' \
+            tool/lighttool.toml
+          grep -E '^version(Code|Name) =' tool/lighttool.toml
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # The debug variant: LightOS admits a tool signed with the Light SDK development key to
+      # the SDK service only when it is debuggable. See README "Local SDK signing".
+      - name: Test and build APK
+        env:
+          GH_PACKAGES_USER: ${{ github.actor }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: ./gradlew :tool:testDebugUnitTest :tool:assembleDebug
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp tool/build/outputs/apk/debug/tool-debug.apk \
+             "out/whoof-${{ steps.ver.outputs.name }}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: out/whoof-${{ steps.ver.outputs.name }}.apk
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+          generate_release_notes: true

@@ -1,0 +1,35 @@
+name: CI
+
+# Run Whoof's tests on every push to main and every PR, so regressions are
+# caught before a release tag is cut.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Tool unit tests
+        # The SDK's keyboard library is on Light's GitHub Packages, which needs a token
+        # with read:packages. GH_PACKAGES_TOKEN is used when set, else the workflow token.
+        env:
+          GH_PACKAGES_USER: ${{ github.actor }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: ./gradlew :tool:testDebugUnitTest

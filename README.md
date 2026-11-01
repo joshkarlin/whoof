@@ -60,6 +60,32 @@ A direct-Bluetooth, fully on-device implementation similar to NOOP may be resear
 - Keep the official WHOOP app set up on another phone so it remains responsible for strap pairing and synchronization.
 - You need a WHOOP account. There is no developer account, client ID, or client secret to create.
 
+### Install
+
+Each release on this repository's GitHub Releases page has a `whoof-<version>.apk`. Add the
+repository to [Obtainium](https://github.com/ImranR98/Obtainium) on the phone to get updates, or
+install over USB:
+
+```bash
+adb install -r --no-incremental whoof-0.2.0.apk
+```
+
+`-r` upgrades in place and keeps your session and cached data. `--no-incremental` matters on the
+LP3: an incremental install streams the APK after reporting success, and if the stream breaks,
+Android deletes the half-installed app; until then LightOS rejects it with "caller not verified". Builds are signed with the public
+Light SDK development key (see [Local SDK signing](#local-sdk-signing)), so a release installs over
+a local debug build and the other way round.
+
+### Releasing
+
+Push a tag such as `v0.2.0`, or `v0.2.0-rc.1` for a prerelease. The release workflow derives
+`versionCode` from the tag, writes it and the base `major.minor.patch` version into
+`tool/lighttool.toml` (the SDK rejects prerelease suffixes there), runs the tool's tests, and
+attaches the debug APK to a GitHub Release (see [Local SDK signing](#local-sdk-signing) for why
+it is the debug build). CI runs the same tests on every push to `main`. Both
+workflows read Light's keyboard package from GitHub Packages, using the `GH_PACKAGES_TOKEN`
+secret (a token with `read:packages`) when it is set and the workflow token otherwise.
+
 ### Sign in on the phone
 
 Open Whoof and choose SIGN IN on Today. Enter your WHOOP email and password and, if WHOOP sends one, the verification code. The SDK text editor does not mask the password while you type it. Earlier direct password attempts returned HTTP 401; if that happens to you, use the QR route.
@@ -84,9 +110,13 @@ Settings > WHOOP account > SIGN OUT ends the session and clears the cache, sync 
 
 This repository inherits `sdk/keys/lightsdk-dev.jks` and its history directly from the official
 [Light SDK](https://github.com/lightphone/light-sdk). Light publishes that certificate for local SDK
-development and the LightOS emulator; production LightOS does not treat it as a Light-approved
-signing certificate. Do not replace it or place production or private signing material in this
-repository.
+development and the LightOS emulator. Whoof's debug and release builds are both signed with it.
+On the LP3 tested (November 2026), LightOS lets a tool signed with this key use the SDK service
+(camera broker, background jobs) only when the build is debuggable: a full install of the
+minified release build was rejected with "caller not verified", while the debug build of the same
+code was accepted. Releases therefore ship the debug build. A private Whoof key is untested, because
+that test was spoiled by an incremental install; see Known issues. Do not
+replace the key or place private signing material in this repository.
 
 The repository is expected to contain two independently buildable parts:
 
@@ -204,6 +234,10 @@ Whoof now has a single sign-in, the WHOOP account session described above. See [
 - Do the WHOOP-style data colours (especially yellow recovery and pale REM) keep enough contrast on the LP3 display and in the LightOS light theme?
 
 ## Known issues
+
+- Whoof is signed with the public Light SDK development key, because LightOS may reject SDK tools signed with any other key. Anyone with that key can sign an APK that installs over Whoof and reads its stored session, so install Whoof only from this repository's releases or your own build.
+- Releases are debuggable builds, because LightOS rejects a release build signed with the development key. A debuggable app's data can be read over USB with `adb run-as` by anyone who can unlock the phone and has USB debugging enabled.
+- A LightOS update that stops trusting the development key would disable Whoof's QR scanner and background sync, and Whoof has no workaround short of being signed by Light.
 
 - History covers the last 14 days fetched on each sync (up to four pages of 25 records per collection) and keeps 30 days locally. Older records are not backfilled.
 - Recoveries are fetched as a single page of 25 and are upserted rather than window-replaced, so a recovery deleted in WHOOP stays cached until its cycle leaves the cache. Cycles, sleeps, and workouts deleted in WHOOP are removed from the window each sync covers.
