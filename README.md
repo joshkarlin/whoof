@@ -16,7 +16,7 @@ Today's data comes from WHOOP's `/developer/v2/` read endpoints (cycle, recovery
 
 The Today screen shows recovery, strain, and sleep dials, HRV and resting heart rate with a trend against the previous seven days, time asleep, and the day's WHOOP activities with heart-rate zone bars. Only the activity list scrolls. Each dial opens a history screen for that metric; a day in strain history opens that day's activities, and tapping a day in sleep history expands its stage breakdown, sleep need, and respiratory rate. Pulling down on Today starts a sync and reveals WHOOP's latest record update separately from Whoof's last successful sync; sync failures stay visible beneath the activities. When signed out, Today shows a message and a SIGN IN button. Settings provides manual sync, the WHOOP account screen (SIGN OUT, which also clears cached records, the sync time, the activity timer, and recent sports), and a confirmed Delete local data that additionally removes the stored no-replay submission marker.
 
-The access token is refreshed on-device when within 60 seconds of expiry, and once after a rejected read; refresh tokens rotate and each rotation is persisted immediately. If the session cannot be refreshed, Today asks you to sign in again. Whoof synchronizes when it opens and when Today is shown again after five minutes. After a failed sync, automatic retries back off from five minutes to one hour, and a WHOOP rate-limit response holds automatic sync for 30 minutes; Sync now in Settings always tries immediately. Periodic background synchronization is not yet implemented; when it is added it must use the same account-session token path and do nothing while signed out.
+The access token is refreshed on-device when within 60 seconds of expiry, and once after a rejected read; refresh tokens rotate and each rotation is persisted immediately. If the session cannot be refreshed, Today asks you to sign in again. Whoof synchronizes when it opens and when Today is shown again after five minutes. After a failed sync, automatic retries back off from five minutes to one hour, and a WHOOP rate-limit response holds automatic sync for 30 minutes; Sync now in Settings always tries immediately. While signed in, a unique `LightWork` job (`whoof-sync`) also syncs about every 30 minutes through the same repository and account-session token path; the system decides the exact timing (minimum 15 minutes, often later), it does nothing while signed out, and sign-out or Delete local data cancels it. Session loss and rate limiting wait for the next interval, and only an unreachable network or WHOOP service asks the system to retry with backoff. Signing in as a new account first clears the previous account's cached records, pending activities, sync time, and activity timer (favourite and recent sports are kept). Requests send the phone's current time zone, falling back to Europe/London only if the phone reports an invalid id.
 
 Whoof can log a completed or timed activity (and delete one) through WHOOP's private activity endpoints; see [the private-API app notes](docs/private-api-app.md). It cannot start or stop strap sessions.
 
@@ -29,7 +29,7 @@ The initial architecture is deliberately constrained to capabilities available i
 - Show recovery, day strain, sleep, and the day's workouts
 - Show per-metric history for recovery, strain, and sleep
 - Cache records for offline viewing
-- Planned: refresh through Light SDK background work
+- Refresh through Light SDK background work (implemented, unverified on the device)
 - Allow the user to disconnect and delete local data; WHOOP-side access revocation is not yet implemented
 
 ### Operating model
@@ -123,7 +123,7 @@ The setup helper is not installed on the Light Phone and is not part of the APK.
 - `WhoopPrivateService.accessToken()` is the only source of bearer tokens for reads. It returns the stored token, refreshing first when it is within 60 seconds of expiry, and persists the rotated pair before returning.
 - A read that returns 401 may force one refresh and be retried once; a second 401 means the session must be re-established. Refresh is never retried or run concurrently, and all callers share one operation lock. Activity POSTs never trigger a refresh or retry.
 - Any refresh the account rejects (Unauthorized or Rejected) is reported as "sign in again". Interruption between remote rotation and local persistence may require signing in again.
-- Request headers for all WHOOP calls come from one place (`WhoopPrivateHeaders`).
+- Request headers for all WHOOP calls come from one place (`WhoopPrivateHeaders`), including `x-whoop-time-zone`, which is the phone's current zone read per request (Europe/London only as a fallback for an invalid id).
 - Passwords and verification codes are held in memory only and never persisted or logged.
 
 ### Account QR threat model
@@ -187,7 +187,8 @@ Whoof now has a single sign-in, the WHOOP account session described above. See [
 - [x] Redesign Today with dials, vitals trends, a scrolling activity log, and pull-to-sync (validated by hand on the LP3; screenshots not yet captured)
 - [x] Add per-metric recovery, strain, and sleep history with expandable sleep rows and a day activity screen (validated by hand on the LP3; screenshots not yet captured)
 - [x] Add Room caching and manual refresh (unit-tested; cached display and pull-to-sync validated on the LP3)
-- [ ] Add periodic synchronization through a unique `LightWork` schedule
+- [x] Add periodic synchronization through a unique `LightWork` schedule (implemented and JVM-tested, unverified on the device): `@LightJob("whoof-sync")`, `enqueuePeriodic` every 30 minutes (UPDATE policy) on app start and after sign-in when signed in, cancelled on sign-out and Delete local data; the system decides exact timing
+- [x] Clear the previous account's cache, pending activities, sync metadata, and timer when a new session is accepted; send the phone's current time zone instead of a fixed one (JVM-tested, unverified on the device)
 - [ ] Sign out and Delete local data clear the session, cached records, sync metadata, activity timer, and recents (implemented and unit-tested; awaiting on-device validation)
 - [ ] Add server-side session revocation from the application
 - [ ] Test offline behavior, token expiry, interrupted refresh, token rotation, and API rate limiting on the device

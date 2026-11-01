@@ -241,6 +241,26 @@ class WhoopSyncTest {
     }
 
     @Test
+    fun acceptingANewAccountClearsCachePendingMetadataAndTimerButKeepsFavouritesAndRecents() = runTest {
+        val cache = MemoryCache()
+        val metadata = MemoryMetadata().apply { recorded = 1L }
+        val session = FakeAccountSession()
+        val pending = MemoryPending(listOf(pendingRow("a", NOW.toEpochMilli())))
+        val prefs = MemoryActivityPrefs(ActivityTimer(0, 1L), mutableListOf(3, 4)).apply { favourites = listOf(1, 2) }
+
+        DefaultWhoofRepository(session, cache, metadata, prefs, pending, FakeHistoryClient()).clearForNewAccount()
+
+        assertEquals(1, cache.clears)
+        assertNull(metadata.recorded)
+        assertEquals(emptyList(), pending.items.value)
+        assertNull(prefs.timer)
+        assertEquals(listOf(3, 4), prefs.recents)
+        assertEquals(listOf(1, 2), prefs.favourites)
+        assertEquals(0, session.disconnects)
+        assertEquals(0, session.deletes)
+    }
+
+    @Test
     fun syncPrunesPendingActivitiesWhoopListsOrThatExpired() = runTest {
         val now = System.currentTimeMillis()
         val cache = MemoryCache()

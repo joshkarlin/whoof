@@ -256,16 +256,64 @@ class HomeViewModelTest {
         assertEquals(60 * MINUTE, failureBackoffMillis(50))
     }
 
+    @Test
+    fun schedulesBackgroundSyncOnStartOnlyWhenSignedIn() {
+        val signedIn = FakeBackgroundSync()
+        homeTest(FakeRepository(), signedIn) { viewModel, _ ->
+            viewModel.start()
+            advanceUntilIdle()
+            assertEquals(listOf("schedule"), signedIn.events)
+        }
+        val signedOut = FakeBackgroundSync()
+        homeTest(FakeRepository(connected = false), signedOut) { viewModel, _ ->
+            viewModel.start()
+            advanceUntilIdle()
+            assertEquals(emptyList(), signedOut.events)
+        }
+    }
+
+    @Test
+    fun schedulesAfterSignInAndCancelsOnSignOutAndDelete() {
+        val sync = FakeBackgroundSync()
+        homeTest(FakeRepository(connected = false), sync) { viewModel, repository ->
+            viewModel.start()
+            advanceUntilIdle()
+            repository.connected = true
+            viewModel.onSignedIn()
+            advanceUntilIdle()
+            assertEquals(listOf("schedule"), sync.events)
+
+            repository.connected = false
+            viewModel.recheckSignIn()
+            advanceUntilIdle()
+            assertEquals(listOf("schedule", "cancel"), sync.events)
+
+            repository.connected = true
+            viewModel.onSignedIn()
+            advanceUntilIdle()
+            viewModel.deleteLocalData()
+            advanceUntilIdle()
+            assertEquals(listOf("schedule", "cancel", "schedule", "cancel"), sync.events)
+        }
+    }
+
     private var clock = NOW_MILLIS
+
+    private class FakeBackgroundSync : BackgroundSync {
+        val events = mutableListOf<String>()
+        override fun schedule() { events += "schedule" }
+        override fun cancel() { events += "cancel" }
+    }
 
     private fun homeTest(
         repository: FakeRepository,
+        backgroundSync: BackgroundSync = NoBackgroundSync,
         block: suspend TestScope.(HomeViewModel, FakeRepository) -> Unit,
     ) = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
         try {
-            block(HomeViewModel(repository, dispatcher) { clock }, repository)
+            block(HomeViewModel(repository, dispatcher, nowMillis = { clock }, backgroundSync = backgroundSync), repository)
         } finally {
             Dispatchers.resetMain()
         }
@@ -308,6 +356,12 @@ private class FakeRepository(
         connected = false
         daysFlow.value = emptyList()
         lastSyncFlow.value = null
+    }
+
+    var accountCleared = 0
+
+    override suspend fun clearForNewAccount() {
+        accountCleared++
     }
 
     override suspend fun deleteLocalData() {

@@ -130,12 +130,57 @@ class SignInViewModelTest {
         assertEquals("WHOOP could not be reached.", vm.state.value.error)
     }
 
+    @Test
+    fun acceptedQrSessionClearsPreviousAccountDataBeforeDone() = signIn(FakeTransport()) { vm, _ ->
+        vm.provisionScanned(QR)
+        advanceUntilIdle()
+        assertEquals(1, accepted)
+        assertTrue(vm.state.value.done)
+    }
+
+    @Test
+    fun acceptedPasswordLoginClearsPreviousAccountDataButRejectedLoginDoesNot() = signIn(
+        FakeTransport(login = { throw PrivateWhoopException(PrivateWhoopError.CredentialsRejected) }),
+    ) { vm, transport ->
+        vm.setEmail("user@example.test")
+        vm.setPassword("synthetic-password")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals(0, accepted)
+        transport.login = { PrivateWhoopLoginResult.Authenticated(SESSION) }
+        vm.setPassword("synthetic-password")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals(1, accepted)
+        assertTrue(vm.state.value.done)
+    }
+
+    @Test
+    fun failedClearSignsBackOutAndReportsAnError() {
+        acceptFailure = IllegalStateException("db")
+        signIn(FakeTransport()) { vm, _ ->
+            vm.provisionScanned(QR)
+            advanceUntilIdle()
+            assertTrue(!vm.state.value.done)
+            assertEquals("The session could not be saved.", vm.state.value.error)
+        }
+    }
+
+    private var accepted = 0
+    private var acceptFailure: Exception? = null
+
     private fun signIn(transport: FakeTransport, block: suspend TestScope.(SignInViewModel, FakeTransport) -> Unit) = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
         try {
             val service = WhoopPrivateService(MemoryStore(), transport) { Instant.ofEpochSecond(NOW) }
-            block(SignInViewModel(service, dispatcher), transport)
+            block(
+                SignInViewModel(service, dispatcher) {
+                    acceptFailure?.let { throw it }
+                    accepted++
+                },
+                transport,
+            )
         } finally {
             Dispatchers.resetMain()
         }

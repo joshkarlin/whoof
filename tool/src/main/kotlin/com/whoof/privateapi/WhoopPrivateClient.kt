@@ -36,6 +36,8 @@ import kotlinx.serialization.json.buildJsonObject
 internal class WhoopPrivateClient internal constructor(
     private val request: PrivateRequestExecutor,
     private val nowEpochSeconds: () -> Long,
+    /** Read per request so a time zone change on the phone applies without a restart. */
+    private val currentTimeZone: () -> String = { WhoopPrivateHeaders.currentTimeZone() },
 ) : WhoopPrivateTransport {
     internal constructor() : this(KtorPrivateRequest(), { Instant.now().epochSecond })
 
@@ -283,7 +285,7 @@ internal class WhoopPrivateClient internal constructor(
 
     private fun deleteActivityUrl(activityId: String) = "$DELETE_ACTIVITY_URL$activityId&apiVersion=7"
 
-    private fun accountHeaders(session: PrivateWhoopSession, timeZone: String = DEFAULT_TIME_ZONE) =
+    private fun accountHeaders(session: PrivateWhoopSession, timeZone: String = currentTimeZone()) =
         WhoopPrivateHeaders.account(session.accessToken, timeZone)
 
     private companion object {
@@ -291,7 +293,6 @@ internal class WhoopPrivateClient internal constructor(
         const val ACCOUNT_URL = "https://api.prod.whoop.com/users-service/v2/bootstrap?apiVersion=7"
         const val ACTIVITY_URL = "https://api.prod.whoop.com/core-details-bff/v0/create-activity?apiVersion=7"
         const val DELETE_ACTIVITY_URL = "https://api.prod.whoop.com/core-details-bff/v1/cardio-details?activityId="
-        const val DEFAULT_TIME_ZONE = WhoopPrivateHeaders.DEFAULT_TIME_ZONE
         const val MAX_RESPONSE_BYTES = 1_048_576
         const val MAX_ERROR_BYTES = 16_384
         val SIGN_IN_ERRORS = mapOf(

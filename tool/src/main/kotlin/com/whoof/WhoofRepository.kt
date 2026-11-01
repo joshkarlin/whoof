@@ -33,6 +33,13 @@ internal interface WhoofRepository {
      */
     suspend fun signOut()
 
+    /**
+     * Called once a new WHOOP session was accepted, before its first sync: removes cached records,
+     * sync metadata, pending activities, and the activity timer so a previous account's data cannot
+     * linger. Favourite and recent sports are nonsensitive preferences and are kept.
+     */
+    suspend fun clearForNewAccount()
+
     /** [signOut] plus removal of everything else stored for the account, including that marker. */
     suspend fun deleteLocalData()
 }
@@ -97,6 +104,13 @@ internal class DefaultWhoofRepository(
     override suspend fun deleteLocalData() = synchronizer.exclusive {
         session.deleteLocalData(confirmed = true)
         clearLocalRecords()
+    }
+
+    override suspend fun clearForNewAccount() = synchronizer.exclusive {
+        cache.clear()
+        pending.clear()
+        metadata.clear()
+        activityPrefs.clearTimer()
     }
 
     private suspend fun clearLocalRecords() {

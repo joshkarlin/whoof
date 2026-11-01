@@ -89,6 +89,8 @@ internal fun PrivateWhoopError.scanMessage(): String = when (this) {
 internal class SignInViewModel(
     private val service: WhoopPrivateService,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** Runs after a session is accepted and before sign-in is reported done; clears the previous account's records. */
+    private val onSessionAccepted: suspend () -> Unit = {},
 ) : LightViewModel<Boolean>() {
     private val _state = MutableStateFlow(SignInUiState())
     val state: StateFlow<SignInUiState> = _state
@@ -148,7 +150,10 @@ internal class SignInViewModel(
         _state.update { it.copy(busy = true, busyLabel = "CONNECTING", error = null) }
         viewModelScope.launch {
             try {
-                withContext(ioDispatcher) { service.provision(text) }
+                withContext(ioDispatcher) {
+                    service.provision(text)
+                    acceptSession()
+                }
                 challenge = null
                 _state.update { it.copy(password = "", code = "", busy = false, done = true) }
             } catch (cancellation: CancellationException) {
@@ -160,10 +165,33 @@ internal class SignInViewModel(
         }
     }
 
+    /**
+     * The session is already stored. If the old account's records cannot be removed, sign out again
+     * rather than leave another account's cached data in place.
+     */
+    private suspend fun acceptSession() {
+        try {
+            onSessionAccepted()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            try {
+                service.disconnect()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+            }
+            throw PrivateWhoopException(PrivateWhoopError.StorageFailed)
+        }
+    }
+
     private suspend fun attempt(call: suspend () -> PrivateWhoopLoginResult) {
         val stage = _state.value.stage
         try {
-            when (val result = withContext(ioDispatcher) { call() }) {
+            val outcome = withContext(ioDispatcher) {
+                call().also { if (it is PrivateWhoopLoginResult.Authenticated) acceptSession() }
+            }
+            when (val result = outcome) {
                 is PrivateWhoopLoginResult.Authenticated -> {
                     challenge = null
                     _state.update { it.copy(password = "", code = "", busy = false, done = true) }
@@ -217,7 +245,10 @@ internal class SignInScreen(
     override val viewModelClass: Class<SignInViewModel> = SignInViewModel::class.java
 
     override fun createViewModel(): SignInViewModel =
-        SignInViewModel(PrivateWhoopServices.getInstance(lightContext))
+        SignInViewModel(
+            PrivateWhoopServices.getInstance(lightContext),
+            onSessionAccepted = DefaultWhoofRepository.getInstance(lightContext)::clearForNewAccount,
+        )
 
     private fun leave(result: Boolean) {
         viewModel.reset()

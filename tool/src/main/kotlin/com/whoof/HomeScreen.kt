@@ -101,6 +101,7 @@ internal class HomeViewModel(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val activityStatus: suspend () -> ActivityStatus = { ActivityStatus() },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val backgroundSync: BackgroundSync = NoBackgroundSync,
 ) : LightViewModel<Unit>() {
     private val _state = MutableStateFlow(HomeUiState())
     val state: StateFlow<HomeUiState> = _state
@@ -141,6 +142,7 @@ internal class HomeViewModel(
         viewModelScope.launch {
             val signedIn = readSignedIn() ?: return@launch
             if (signedIn) {
+                backgroundSync.schedule()
                 _state.update { it.copy(connection = Connection.Connected) }
                 sync()
             } else {
@@ -174,6 +176,7 @@ internal class HomeViewModel(
                 signedIn && !connected -> onSignedIn()
                 signedIn -> syncIfStale()
                 connected -> {
+                    backgroundSync.cancel()
                     stopSync()
                     resetBackoff()
                     _state.update { it.copy(connection = Connection.NotConnected, sync = SyncStatus.Idle, message = null) }
@@ -184,6 +187,7 @@ internal class HomeViewModel(
 
     /** After a successful sign-in: clears any expired-session state and syncs immediately. */
     fun onSignedIn() {
+        backgroundSync.schedule()
         resetBackoff()
         _state.update { it.copy(connection = Connection.Connected, sync = SyncStatus.Idle, message = null) }
         sync()
@@ -243,6 +247,7 @@ internal class HomeViewModel(
                 _state.update { it.copy(message = "Unable to delete local data.") }
                 return@launch
             }
+            backgroundSync.cancel()
             resetBackoff()
             _state.update { it.copy(connection = Connection.NotConnected, sync = SyncStatus.Idle, message = null) }
         }
@@ -308,7 +313,11 @@ internal class HomeScreen(
 
     private val activityTools = ActivityTools.from(lightContext)
 
-    override fun createViewModel(): HomeViewModel = HomeViewModel(repository, activityStatus = activityTools::status)
+    override fun createViewModel(): HomeViewModel = HomeViewModel(
+        repository,
+        activityStatus = activityTools::status,
+        backgroundSync = LightWorkBackgroundSync(lightContext),
+    )
 
     private fun signIn() {
         navigateTo(::SignInScreen) { signedIn -> if (signedIn) viewModel.onSignedIn() }

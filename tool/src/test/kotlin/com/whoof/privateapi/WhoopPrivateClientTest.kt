@@ -108,13 +108,13 @@ class WhoopPrivateClientTest {
     fun accountCheckUsesFixedHeadersAndDoesNotExposeUserId() = runTest {
         val privateId = "98765432101234567890"
         val executor = FakeExecutor(response(200, """{"user":{"id":"$privateId"}}"""))
-        WhoopPrivateClient(executor, { NOW }).checkAccount(session())
+        WhoopPrivateClient(executor, { NOW }, { "Asia/Tokyo" }).checkAccount(session())
         val request = executor.requests.single()
         assertEquals("GET", request.method)
         assertEquals(ACCOUNT_URL, request.url)
         assertEquals(null, request.body)
         assertEquals("Bearer $ACCESS", request.headers["Authorization"])
-        assertEquals("Europe/London", request.headers["x-whoop-time-zone"])
+        assertEquals("Asia/Tokyo", request.headers["x-whoop-time-zone"])
         assertEquals("com.whoop.iphone", request.headers["x-whoop-bundle-name"])
         assertEquals("5.48.0", request.headers["x-whoop-ios-version"])
         assertEquals("573097", request.headers["x-whoop-ios-build-number"])
